@@ -3,208 +3,278 @@ package com.love.calling.sip
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.linphone.core.*
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
+data class CallHistoryItem(
+    val number: String,
+    val type: String, // "Outgoing", "Incoming", "Missed"
+    val time: String
+)
+
 object SipManager {
     private var core: Core? = null
-    private var coreListener: CoreListenerStub? = null
+    private var appContext: Context? = null
 
-    private val _registrationState = MutableStateFlow("Disconnected")
-    val registrationState: StateFlow<String> = _registrationState
+    private val _regState = MutableStateFlow("Disconnected")
+    val regState: StateFlow<String> = _regState.asStateFlow()
 
     private val _callState = MutableStateFlow("Idle")
-    val callState: StateFlow<String> = _callState
+    val callState: StateFlow<String> = _callState.asStateFlow()
 
-    private val _isRecording = MutableStateFlow(false)
-    val isRecording: StateFlow<Boolean> = _isRecording
+    private val _remoteNumber = MutableStateFlow("")
+    val remoteNumber: StateFlow<String> = _remoteNumber.asStateFlow()
 
     private val _isMuted = MutableStateFlow(false)
-    val isMuted: StateFlow<Boolean> = _isMuted
+    val isMuted: StateFlow<Boolean> = _isMuted.asStateFlow()
 
-    private val _isSpeakerOn = MutableStateFlow(false)
-    val isSpeakerOn: StateFlow<Boolean> = _isSpeakerOn
+    private val _isSpeaker = MutableStateFlow(false)
+    val isSpeaker: StateFlow<Boolean> = _isSpeaker.asStateFlow()
+
+    private val _isOnHold = MutableStateFlow(false)
+    val isOnHold: StateFlow<Boolean> = _isOnHold.asStateFlow()
+
+    private val _isRecording = MutableStateFlow(false)
+    val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
+
+    private val _recentCalls = MutableStateFlow<List<CallHistoryItem>>(emptyList())
+    val recentCalls: StateFlow<List<CallHistoryItem>> = _recentCalls.asStateFlow()
+
+    private val coreListener = object : CoreListenerStub() {
+        override fun onAccountRegistrationStateChanged(
+            core: Core,
+            account: Account,
+            state: RegistrationState,
+            message: String
+        ) {
+            _regState.value = when (state) {
+                RegistrationState.Ok -> "Online"
+                RegistrationState.Progress -> "Connecting..."
+                RegistrationState.Failed -> "Failed: $message"
+                RegistrationState.Cleared -> "Disconnected"
+                else -> "Offline"
+            }
+        }
+
+        override fun onCallStateChanged(
+            core: Core,
+            call: Call,
+            state: Call.State,
+            message: String
+        ) {
+            val number = call.remoteAddress.username ?: call.remoteAddress.asStringUriOnly()
+            _remoteNumber.value = number
+
+            when (state) {
+                Call.State.OutgoingInit, Call.State.OutgoingProgress, Call.State.OutgoingRinging -> {
+                    _callState.value = "Calling..."
+                }
+                Call.State.IncomingReceived -> {
+                    _callState.value = "Incoming"
+                    addHistory(number, "Incoming")
+                }
+                Call.State.StreamsRunning -> {
+                    _callState.value = "Connected"
+                    _isOnHold.value = false
+                }
+                Call.State.Paused, Call.State.PausedByRemote -> {
+                    _callState.value = "On Hold"
+                    _isOnHold.value = true
+                }
+                Call.State.End, Call.State.Released, Call.State.Error -> {
+                    _callState.value = "Idle"
+                    _isMuted.value = false
+                    _isOnHold.value = false
+                    _isRecording.value = false
+                }
+                else -> {}
+            }
+        }
+    }
 
     fun init(context: Context) {
         if (core != null) return
+        appContext = context.applicationContext
+        loadHistory()
 
         val factory = Factory.instance()
-        factory.setDebugMode(true, "LoveCallingSIP")
-        core = factory.createCore(null, null, context)
+        factory.setDebugMode(false, "LoveSIP")
+        val c = factory.createCore(null, null, appContext!!)
 
-        // Enable Opus codec for crystal clear voice on weak SIM data / Wi-Fi
-        core?.audioPayloadTypes?.forEach { payload ->
-            payload.enable(payload.mimeType.equals("opus", ignoreCase = true) || payload.mimeType.equals("PCMU", ignoreCase = true))
+        // SIM Mobile Data (MB) & Any IP Network Optimization
+        c.isIpv6Enabled = false // Force IPv4 so Bangladeshi SIM data doesn't drop UDP
+        c.isKeepAliveEnabled = true
+        c.config.setInt("sip", "keep_alive_period", 15000)
+        c.config.setBool("net", "allow_ipv6", false)
+        c.config.setBool("rtp", "symmetric", true)
+
+        // Enable STUN & ICE so audio works on Mobile Data (CGNAT) and any Wi-Fi
+        val natPolicy = c.createNatPolicy()
+        natPolicy.stunServer = "stun.l.google.com:19302"
+        natPolicy.isStunEnabled = true
+        natPolicy.isIceEnabled = true
+        c.natPolicy = natPolicy
+
+        // Enable Opus, PCMU, PCMA codecs for clear voice on low MB speed
+        c.audioPayloadTypes.forEach { pt ->
+            pt.enable(pt.mimeType.equals("opus", true) || pt.mimeType.equals("PCMU", true) || pt.mimeType.equals("PCMA", true))
         }
 
-        // Enable IPv6 & Keep-Alive to prevent SIM operator drops
-        core?.isIpv6Enabled = true
-        core?.isKeepAliveEnabled = true
-
-        coreListener = object : CoreListenerStub() {
-            override fun onAccountRegistrationStateChanged(
-                core: Core,
-                account: Account,
-                state: RegistrationState,
-                message: String
-            ) {
-                _registrationState.value = when (state) {
-                    RegistrationState.Ok -> "Online"
-                    RegistrationState.Progress -> "Connecting..."
-                    RegistrationState.Failed -> "Failed: $message"
-                    else -> "Disconnected"
-                }
-            }
-
-            override fun onCallStateChanged(
-                core: Core,
-                call: Call,
-                state: Call.State,
-                message: String
-            ) {
-                _callState.value = when (state) {
-                    Call.State.IncomingReceived -> "Incoming: ${call.remoteAddress.username}"
-                    Call.State.OutgoingInit, Call.State.OutgoingProgress, Call.State.OutgoingRinging -> "Calling..."
-                    Call.State.Connected, Call.State.StreamsRunning -> "Connected"
-                    Call.State.End, Call.State.Released -> {
-                        _isRecording.value = false
-                        _isMuted.value = false
-                        "Idle"
-                    }
-                    Call.State.Error -> "Error: $message"
-                    else -> state.name
-                }
-            }
-        }
-
-        core?.addListener(coreListener!!)
-        core?.start()
+        c.addListener(coreListener)
+        c.start()
+        core = c
     }
 
     fun iterate() {
         core?.iterate()
     }
 
-    /**
-     * Login to FreePBX/Asterisk using TLS (Port 5061) & STUN/TURN to bypass SIM/Wi-Fi blocks
-     */
-    fun login(
-        domain: String,
-        username: String,
-        password: String,
-        port: Int = 5061,
-        useTls: Boolean = true,
-        stunServer: String = "stun.l.google.com:19302"
-    ) {
-        val currentCore = core ?: return
-        currentCore.clearAccounts()
-        currentCore.clearAllAuthInfo()
+    fun register(server: String, user: String, pass: String, port: Int, useTls: Boolean) {
+        val c = core ?: return
+        c.clearAccounts()
+        c.clearAllAuthInfo()
 
-        // Configure STUN/ICE for NAT traversal on Mobile Data & Wi-Fi
-        val natPolicy = currentCore.createNatPolicy()
-        natPolicy.stunServer = stunServer
-        natPolicy.isStunEnabled = true
-        natPolicy.isIceEnabled = true
-        currentCore.natPolicy = natPolicy
+        val cleanServer = server.trim()
+        val cleanUser = user.trim()
+        if (cleanServer.isEmpty() || cleanUser.isEmpty()) return
 
-        val authInfo = Factory.instance().createAuthInfo(username, null, password, null, null, domain, null)
-        currentCore.addAuthInfo(authInfo)
+        val authInfo = Factory.instance().createAuthInfo(cleanUser, null, pass, null, null, cleanServer, null)
+        c.addAuthInfo(authInfo)
 
-        val accountParams = currentCore.createAccountParams()
-        val identity = Factory.instance().createAddress("sip:$username@$domain")
-        accountParams.identityAddress = identity
-
+        val accountParams = c.createAccountParams()
+        val identity = Factory.instance().createAddress("sip:$cleanUser@$cleanServer")
         val transport = if (useTls) "tls" else "udp"
-        val serverAddress = Factory.instance().createAddress("sip:$domain:$port;transport=$transport")
-        accountParams.serverAddress = serverAddress
-        accountParams.isRegisterEnabled = true
-        accountParams.natPolicy = natPolicy
+        val serverAddr = Factory.instance().createAddress("sip:$cleanServer:$port;transport=$transport")
 
-        // Enable SRTP Media Encryption if using TLS
-        if (useTls) {
-            currentCore.mediaEncryption = MediaEncryption.SRTP
+        if (identity != null && serverAddr != null) {
+            accountParams.identityAddress = identity
+            accountParams.serverAddress = serverAddr
+            accountParams.isRegisterEnabled = true
+            accountParams.isOutboundProxyEnabled = true
+            accountParams.natPolicy = c.natPolicy
+            val account = c.createAccount(accountParams)
+            c.addAccount(account)
+            c.defaultAccount = account
+        }
+    }
+
+    fun makeCall(target: String) {
+        val c = core ?: return
+        val cleanNumber = target.trim().replace(" ", "")
+        if (cleanNumber.isEmpty()) return
+
+        addHistory(cleanNumber, "Outgoing")
+
+        val domain = c.defaultAccount?.params?.identityAddress?.domain ?: return
+        val address = if (cleanNumber.startsWith("sip:")) {
+            Factory.instance().createAddress(cleanNumber)
+        } else {
+            Factory.instance().createAddress("sip:$cleanNumber@$domain")
         }
 
-        val account = currentCore.createAccount(accountParams)
-        currentCore.addAccount(account)
-        currentCore.defaultAccount = account
-    }
-
-    /**
-     * Make a 1-on-1 call OR dial Conference Room (e.g. "8000")
-     */
-    fun makeCall(targetExtension: String, domain: String, context: Context) {
-        val currentCore = core ?: return
-        val remoteAddress = Factory.instance().createAddress("sip:$targetExtension@$domain") ?: return
-        val params = currentCore.createCallParams(null) ?: return
-
-        // Set up local recording file path
-        val recordDir = File(context.getExternalFilesDir(null), "Recordings")
-        if (!recordDir.exists()) recordDir.mkdirs()
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val recordFile = File(recordDir, "Call_${targetExtension}_$timestamp.wav")
-        params.recordFile = recordFile.absolutePath
-
-        currentCore.inviteAddressWithParams(remoteAddress, params)
-    }
-
-    /**
-     * Join 3-Way Conference Room directly (Extension 8000 on FreePBX)
-     */
-    fun joinConferenceRoom(domain: String, context: Context, roomNumber: String = "8000") {
-        makeCall(roomNumber, domain, context)
-    }
-
-    /**
-     * Merge all active calls on phone into a local 3-way conference
-     */
-    fun mergeAllCallsToConference() {
-        core?.addAllToConference()
+        if (address != null) {
+            val params = c.createCallParams(null)
+            params?.isAudioEnabled = true
+            params?.isVideoEnabled = false
+            c.inviteAddressWithParams(address, params!!)
+        }
     }
 
     fun answerCall() {
         core?.currentCall?.accept()
     }
 
-    fun hangUp() {
-        val currentCall = core?.currentCall
-        if (currentCall != null) {
-            currentCall.terminate()
-        } else {
-            core?.terminateAllCalls()
+    fun hangup() {
+        val c = core ?: return
+        if (c.callsNb > 0) {
+            c.terminateAllCalls()
         }
+        _callState.value = "Idle"
     }
 
     fun toggleMute() {
-        val currentCore = core ?: return
-        val newState = !currentCore.isMicEnabled
-        currentCore.isMicEnabled = newState
-        _isMuted.value = !newState
+        val c = core ?: return
+        val next = !_isMuted.value
+        c.isMicEnabled = !next
+        _isMuted.value = next
+    }
+
+    fun toggleHold() {
+        val call = core?.currentCall ?: return
+        if (_isOnHold.value) {
+            call.resume()
+            _isOnHold.value = false
+        } else {
+            call.pause()
+            _isOnHold.value = true
+        }
     }
 
     fun toggleSpeaker() {
-        val currentCore = core ?: return
-        val newSpeakerState = !_isSpeakerOn.value
-        val targetDevice = currentCore.audioDevices.find {
-            if (newSpeakerState) it.type == AudioDevice.Type.Speaker
-            else it.type == AudioDevice.Type.Earpiece
+        val c = core ?: return
+        val next = !_isSpeaker.value
+        val targetType = if (next) AudioDevice.Type.Speaker else AudioDevice.Type.Earpiece
+        val device = c.audioDevices.firstOrNull { it.type == targetType }
+        if (device != null) {
+            c.outputAudioDevice = device
         }
-        if (targetDevice != null) {
-            currentCore.outputAudioDevice = targetDevice
-            _isSpeakerOn.value = newSpeakerState
+        _isSpeaker.value = next
+    }
+
+    fun sendDtmf(digit: Char) {
+        core?.currentCall?.sendDtmf(digit)
+    }
+
+    fun toggleRecord() {
+        val call = core?.currentCall ?: return
+        val ctx = appContext ?: return
+        if (!_isRecording.value) {
+            val dir = File(ctx.getExternalFilesDir(null), "Recordings")
+            if (!dir.exists()) dir.mkdirs()
+            val file = File(dir, "call_${System.currentTimeMillis()}.wav")
+            call.params.recordFile = file.absolutePath
+            call.startRecording()
+            _isRecording.value = true
+        } else {
+            call.stopRecording()
+            _isRecording.value = false
         }
     }
 
-    fun toggleRecording() {
-        val call = core?.currentCall ?: return
-        if (_isRecording.value) {
-            call.stopRecording()
-            _isRecording.value = false
+    fun startConference() {
+        val c = core ?: return
+        if (c.callsNb >= 2) {
+            val confParams = c.createConferenceParams(null)
+            val conf = c.createConferenceWithParams(confParams)
+            conf?.addParticipants(c.calls)
         } else {
-            call.startRecording()
-            _isRecording.value = true
+            makeCall("8000")
+        }
+    }
+
+    private fun addHistory(number: String, type: String) {
+        val time = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date())
+        val current = _recentCalls.value.toMutableList()
+        current.add(0, CallHistoryItem(number, type, time))
+        val trimmed = current.take(50)
+        _recentCalls.value = trimmed
+
+        val prefs = appContext?.getSharedPreferences("sip_history", Context.MODE_PRIVATE) ?: return
+        val serialized = trimmed.joinToString("||") { "${it.number}::${it.type}::${it.time}" }
+        prefs.edit().putString("logs", serialized).apply()
+    }
+
+    private fun loadHistory() {
+        val prefs = appContext?.getSharedPreferences("sip_history", Context.MODE_PRIVATE) ?: return
+        val raw = prefs.getString("logs", "") ?: ""
+        if (raw.isNotEmpty()) {
+            _recentCalls.value = raw.split("||").mapNotNull {
+                val parts = it.split("::")
+                if (parts.size == 3) CallHistoryItem(parts[0], parts[1], parts[2]) else null
+            }
         }
     }
 }

@@ -1,6 +1,10 @@
 package com.love.calling.sip
 
 import android.content.Context
+import android.os.Build
+import android.telephony.SmsManager
+import android.view.TextureView
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,7 +18,8 @@ import java.util.*
 data class CallHistoryItem(
     val number: String,
     val type: String,
-    val time: String
+    val time: String,
+    val duration: String = "00:00"
 )
 
 data class SipAccountItem(
@@ -24,18 +29,43 @@ data class SipAccountItem(
     val username: String,
     val password: String,
     val port: Int,
-    val useTls: Boolean
+    val transport: String
+)
+
+data class ChatMessageItem(
+    val id: String,
+    val peer: String,
+    val body: String,
+    val isOutgoing: Boolean,
+    val channel: String,
+    val time: String
+)
+
+data class CodecToggleItem(
+    val mime: String,
+    val clockRate: Int,
+    val enabled: Boolean
 )
 
 object SipManager {
     private var core: Core? = null
     private var appContext: Context? = null
 
+    private val managerScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var timerJob: Job? = null
+    private var callStartTimeMs: Long = 0L
+
+    private val _callDurationSec = MutableStateFlow(0L)
+    val callDurationSec: StateFlow<Long> = _callDurationSec.asStateFlow()
+
     private val _regState = MutableStateFlow("Disconnected")
     val regState: StateFlow<String> = _regState.asStateFlow()
 
     private val _callState = MutableStateFlow("Idle")
     val callState: StateFlow<String> = _callState.asStateFlow()
+
+    private val _isVideoCall = MutableStateFlow(false)
+    val isVideoCall: StateFlow<Boolean> = _isVideoCall.asStateFlow()
 
     private val _remoteNumber = MutableStateFlow("")
     val remoteNumber: StateFlow<String> = _remoteNumber.asStateFlow()
@@ -64,11 +94,83 @@ object SipManager {
     private val _recentCalls = MutableStateFlow<List<CallHistoryItem>>(emptyList())
     val recentCalls: StateFlow<List<CallHistoryItem>> = _recentCalls.asStateFlow()
 
+    private val _messages = MutableStateFlow<List<ChatMessageItem>>(emptyList())
+    val messages: StateFlow<List<ChatMessageItem>> = _messages.asStateFlow()
+
+    private val _audioCodecs = MutableStateFlow<List<CodecToggleItem>>(emptyList())
+    val audioCodecs: StateFlow<List<CodecToggleItem>> = _audioCodecs.asStateFlow()
+
     private val _accounts = MutableStateFlow<List<SipAccountItem>>(emptyList())
     val accounts: StateFlow<List<SipAccountItem>> = _accounts.asStateFlow()
 
     private val _activeAccountId = MutableStateFlow("")
     val activeAccountId: StateFlow<String> = _activeAccountId.asStateFlow()
+
+    private val _allowIpv6 = MutableStateFlow(false)
+    val allowIpv6: StateFlow<Boolean> = _allowIpv6.asStateFlow()
+
+    private val _useRandomPort = MutableStateFlow(true)
+    val useRandomPort: StateFlow<Boolean> = _useRandomPort.asStateFlow()
+
+    private val _enableStunIce = MutableStateFlow(true)
+    val enableStunIce: StateFlow<Boolean> = _enableStunIce.asStateFlow()
+
+    private val _enableRportSymmetric = MutableStateFlow(true)
+    val enableRportSymmetric: StateFlow<Boolean> = _enableRportSymmetric.asStateFlow()
+
+    private val _dndEnabled = MutableStateFlow(false)
+    val dndEnabled: StateFlow<Boolean> = _dndEnabled.asStateFlow()
+
+    private val _autoAnswerEnabled = MutableStateFlow(false)
+    val autoAnswerEnabled: StateFlow<Boolean> = _autoAnswerEnabled.asStateFlow()
+
+    private val _stunServer = MutableStateFlow("stun.l.google.com:19302")
+    val stunServer: StateFlow<String> = _stunServer.asStateFlow()
+
+    private val _keepAliveSec = MutableStateFlow(10)
+    val keepAliveSec: StateFlow<Int> = _keepAliveSec.asStateFlow()
+
+    private var currentSessionNumber: String = ""
+    private var currentSessionDir: String = "Outgoing"
+    private var wasAnswered = false
+
+    fun formatDuration(totalSec: Long): String {
+        val hrs = totalSec / 3600
+        val mins = (totalSec % 3600) / 60
+        val secs = totalSec % 60
+        return if (hrs > 0) {
+            String.format(Locale.US, "%02d:%02d:%02d", hrs, mins, secs)
+        } else {
+            String.format(Locale.US, "%02d:%02d", mins, secs)
+        }
+    }
+
+    private fun startLiveTimerIfNotRunning() {
+        if (callStartTimeMs == 0L) {
+            callStartTimeMs = System.currentTimeMillis()
+        }
+        if (timerJob?.isActive == true) return
+        timerJob = managerScope.launch {
+            while (isActive) {
+                val elapsed = (System.currentTimeMillis() - callStartTimeMs) / 1000L
+                _callDurationSec.value = elapsed.coerceAtLeast(0L)
+                delay(500L)
+            }
+        }
+    }
+
+    private fun stopLiveTimerAndGetFormatted(): String {
+        val finalSec = if (callStartTimeMs > 0L) {
+            ((System.currentTimeMillis() - callStartTimeMs) / 1000L).coerceAtLeast(1L)
+        } else {
+            0L
+        }
+        timerJob?.cancel()
+        timerJob = null
+        callStartTimeMs = 0L
+        _callDurationSec.value = 0L
+        return formatDuration(finalSec)
+    }
 
     private val coreListener = object : CoreListenerStub() {
         override fun onAccountRegistrationStateChanged(
@@ -86,6 +188,14 @@ object SipManager {
             }
         }
 
+        override fun onMessageReceived(core: Core, room: ChatRoom, message: ChatMessage) {
+            val sender = message.fromAddress.username ?: message.fromAddress.asStringUriOnly()
+            val text = message.utf8Text ?: return
+            if (text.isNotEmpty()) {
+                saveMessage(sender, text, isOutgoing = false, channel = "SIP")
+            }
+        }
+
         override fun onCallStateChanged(
             core: Core,
             call: Call,
@@ -93,32 +203,61 @@ object SipManager {
             message: String
         ) {
             _activeCallsCount.value = core.callsNb
-            _isInConference.value = core.conference != null && (core.conference?.participantCount ?: 0) >= 2
+            val inConf = core.conference != null && (core.conference?.participantCount ?: 0) >= 2
+            _isInConference.value = inConf
+
+            val hasVideo = call.currentParams?.isVideoEnabled == true || call.remoteParams?.isVideoEnabled == true
+            _isVideoCall.value = hasVideo
 
             val number = call.remoteAddress.username ?: call.remoteAddress.asStringUriOnly()
-            if (core.callsNb <= 1) {
-                _remoteNumber.value = number
+            if (currentSessionNumber.isEmpty()) {
+                currentSessionNumber = number
+            }
+            _remoteNumber.value = if (inConf || core.callsNb > 1) {
+                "Conference (${core.callsNb} Calls)"
             } else {
-                _remoteNumber.value = "${core.callsNb} Active Calls"
+                number
             }
 
             when (state) {
                 Call.State.OutgoingInit, Call.State.OutgoingProgress, Call.State.OutgoingRinging -> {
+                    if (core.callsNb <= 1) {
+                        wasAnswered = false
+                        currentSessionNumber = number
+                        currentSessionDir = if (hasVideo) "Video Outgoing" else "Outgoing"
+                    }
                     _callState.value = "Calling..."
                     _isAddingCall.value = false
                 }
                 Call.State.IncomingReceived -> {
+                    if (_dndEnabled.value) {
+                        call.decline(Reason.Busy)
+                        addHistory(number, "Missed (DND)", "00:00")
+                        return
+                    }
+                    if (core.callsNb <= 1) {
+                        wasAnswered = false
+                        currentSessionNumber = number
+                        currentSessionDir = if (hasVideo) "Video Incoming" else "Incoming"
+                    }
                     _callState.value = "Incoming"
                     _isAddingCall.value = false
-                    addHistory(number, "Incoming")
+                    if (_autoAnswerEnabled.value) {
+                        answerCall(withVideo = hasVideo)
+                    }
                 }
                 Call.State.StreamsRunning -> {
+                    wasAnswered = true
                     _callState.value = "Connected"
                     _isOnHold.value = false
                     _isAddingCall.value = false
+                    if (hasVideo && !_isSpeaker.value) {
+                        toggleSpeaker()
+                    }
+                    startLiveTimerIfNotRunning()
                 }
                 Call.State.Paused, Call.State.PausedByRemote -> {
-                    if (core.callsNb == 1) {
+                    if (core.callsNb == 1 && !inConf) {
                         _callState.value = "On Hold"
                         _isOnHold.value = true
                     }
@@ -126,7 +265,20 @@ object SipManager {
                 Call.State.End, Call.State.Released, Call.State.Error -> {
                     _activeCallsCount.value = core.callsNb
                     if (core.callsNb == 0) {
+                        val totalDurationStr = stopLiveTimerAndGetFormatted()
+                        val logType = if (!wasAnswered && currentSessionDir.contains("Incoming")) {
+                            "Missed"
+                        } else if (inConf) {
+                            "Conference"
+                        } else {
+                            currentSessionDir
+                        }
+                        addHistory(currentSessionNumber.ifEmpty { number }, logType, totalDurationStr)
+
+                        currentSessionNumber = ""
+                        wasAnswered = false
                         _callState.value = "Idle"
+                        _isVideoCall.value = false
                         _isMuted.value = false
                         _isOnHold.value = false
                         _isRecording.value = false
@@ -145,48 +297,168 @@ object SipManager {
     fun init(context: Context) {
         if (core != null) return
         appContext = context.applicationContext
+        loadSettings()
         loadHistory()
+        loadMessages()
         loadAccounts()
 
         val factory = Factory.instance()
         factory.setDebugMode(false, "LoveSIP")
         val c = factory.createCore(null, null, appContext!!)
 
-        // Teletalk SIM ও Random IP / Strict CGNAT নেটওয়ার্কের জন্য বিশেষ অপ্টিমাইজেশন
-        c.isIpv6Enabled = false
-        c.config.setBool("net", "allow_ipv6", false)
-        c.config.setBool("rtp", "symmetric", true)
-        c.config.setBool("sip", "rport", true)
-        c.config.setBool("sip", "use_rport", true)
-        c.isKeepAliveEnabled = true
-        c.config.setInt("sip", "keep_alive_period", 10000) // প্রতি ১০ সেকেন্ডে NAT পোর্ট খোলা রাখবে
+        applyNetworkPolicies(c)
 
-        // Random Local Port ব্যবহার করা যাতে টেলিটক সিমে পোর্ট ব্লক বা কনফ্লিক্ট না হয়
-        val transports = c.transports
-        transports.udpPort = -1
-        transports.tcpPort = -1
-        transports.tlsPort = -1
-        c.transports = transports
+        c.isEchoCancellationEnabled = true
+        c.isAdaptiveRateControlEnabled = true
+        c.config.setInt("rtp", "audio_jitt_comp", 60)
+        c.config.setInt("rtp", "video_jitt_comp", 80)
+        c.config.setBool("sound", "ec_state", true)
 
-        // Multiple STUN & ICE চালু করা যাতে Random IP থেকেও অডিও পরিষ্কার যায়
-        val natPolicy = c.createNatPolicy()
-        natPolicy.stunServer = "stun.l.google.com:19302"
-        natPolicy.isStunEnabled = true
-        natPolicy.isIceEnabled = true
-        c.natPolicy = natPolicy
-
-        // লো-স্পিড মোবাইল ডেটাতেও ক্লিয়ার ভয়েসের জন্য কোডেক সেটআপ
         c.audioPayloadTypes.forEach { pt ->
-            pt.enable(
-                pt.mimeType.equals("opus", true) ||
-                pt.mimeType.equals("PCMU", true) ||
-                pt.mimeType.equals("PCMA", true)
-            )
+            pt.enable(true)
+        }
+        refreshCodecList(c)
+
+        c.isVideoCaptureEnabled = true
+        c.isVideoDisplayEnabled = true
+        val videoPolicy = c.videoActivationPolicy
+        videoPolicy.automaticallyAccept = true
+        videoPolicy.automaticallyInitiate = false
+        c.videoActivationPolicy = videoPolicy
+        c.setPreferredVideoDefinitionByName("720p")
+        c.videoPayloadTypes.forEach { pt ->
+            pt.enable(true)
+        }
+
+        val frontCam = c.videoDevicesList.firstOrNull { it.contains("Front", ignoreCase = true) }
+            ?: c.videoDevicesList.firstOrNull()
+        if (frontCam != null) {
+            c.videoDevice = frontCam
         }
 
         c.addListener(coreListener)
         c.start()
         core = c
+    }
+
+    fun refreshCodecList(targetCore: Core? = core) {
+        val c = targetCore ?: return
+        _audioCodecs.value = c.audioPayloadTypes.map {
+            CodecToggleItem(it.mimeType, it.clockRate, it.enabled())
+        }
+    }
+
+    fun toggleAudioCodec(mime: String, clockRate: Int, enable: Boolean) {
+        val c = core ?: return
+        c.audioPayloadTypes.firstOrNull { it.mimeType == mime && it.clockRate == clockRate }?.enable(enable)
+        refreshCodecList(c)
+    }
+
+    fun setVideoViews(remoteView: TextureView?, previewView: TextureView?) {
+        val c = core ?: return
+        c.nativeVideoWindowId = remoteView
+        c.nativePreviewWindowId = previewView
+    }
+
+    fun switchCamera() {
+        val c = core ?: return
+        val devices = c.videoDevicesList
+        if (devices.size < 2) return
+        val current = c.videoDevice
+        val next = devices.firstOrNull { it != current && !it.contains("StaticImage", true) } ?: return
+        c.videoDevice = next
+    }
+
+    fun toggleVideoDuringCall() {
+        val c = core ?: return
+        val call = c.currentCall ?: return
+        val params = c.createCallParams(call) ?: return
+        val nextState = !(call.currentParams?.isVideoEnabled ?: false)
+        params.isVideoEnabled = nextState
+        call.update(params)
+        _isVideoCall.value = nextState
+    }
+
+    fun applyNetworkPolicies(targetCore: Core? = core) {
+        val c = targetCore ?: return
+
+        c.isIpv6Enabled = _allowIpv6.value
+        c.config.setBool("net", "allow_ipv6", _allowIpv6.value)
+
+        val transports = c.transports
+        if (_useRandomPort.value) {
+            transports.udpPort = -1
+            transports.tcpPort = -1
+            transports.tlsPort = -1
+        } else {
+            transports.udpPort = 5060
+            transports.tcpPort = 5060
+            transports.tlsPort = 5061
+        }
+        c.transports = transports
+
+        c.config.setBool("rtp", "symmetric", _enableRportSymmetric.value)
+        c.config.setBool("sip", "rport", _enableRportSymmetric.value)
+        c.config.setBool("sip", "use_rport", _enableRportSymmetric.value)
+
+        c.isKeepAliveEnabled = true
+        c.config.setInt("sip", "keep_alive_period", _keepAliveSec.value * 1000)
+
+        val natPolicy = c.createNatPolicy()
+        natPolicy.stunServer = _stunServer.value.trim().ifEmpty { "stun.l.google.com:19302" }
+        natPolicy.isStunEnabled = _enableStunIce.value
+        natPolicy.isIceEnabled = _enableStunIce.value
+        c.natPolicy = natPolicy
+    }
+
+    fun updateAdvancedSettings(
+        ipv6: Boolean,
+        randomPort: Boolean,
+        stunIce: Boolean,
+        rportSym: Boolean,
+        dnd: Boolean,
+        autoAns: Boolean,
+        stunHost: String,
+        keepAlive: Int
+    ) {
+        _allowIpv6.value = ipv6
+        _useRandomPort.value = randomPort
+        _enableStunIce.value = stunIce
+        _enableRportSymmetric.value = rportSym
+        _dndEnabled.value = dnd
+        _autoAnswerEnabled.value = autoAns
+        _stunServer.value = stunHost.trim()
+        _keepAliveSec.value = keepAlive.coerceIn(5, 120)
+
+        appContext?.getSharedPreferences("sip_adv_prefs", Context.MODE_PRIVATE)?.edit()
+            ?.putBoolean("allow_ipv6", ipv6)
+            ?.putBoolean("random_port", randomPort)
+            ?.putBoolean("stun_ice", stunIce)
+            ?.putBoolean("rport_sym", rportSym)
+            ?.putBoolean("dnd", dnd)
+            ?.putBoolean("auto_ans", autoAns)
+            ?.putString("stun_server", _stunServer.value)
+            ?.putInt("keep_alive", _keepAliveSec.value)
+            ?.apply()
+
+        applyNetworkPolicies()
+
+        val activeAcc = _accounts.value.firstOrNull { it.id == _activeAccountId.value }
+        if (activeAcc != null) {
+            activateAccount(activeAcc)
+        }
+    }
+
+    private fun loadSettings() {
+        val p = appContext?.getSharedPreferences("sip_adv_prefs", Context.MODE_PRIVATE) ?: return
+        _allowIpv6.value = p.getBoolean("allow_ipv6", false)
+        _useRandomPort.value = p.getBoolean("random_port", true)
+        _enableStunIce.value = p.getBoolean("stun_ice", true)
+        _enableRportSymmetric.value = p.getBoolean("rport_sym", true)
+        _dndEnabled.value = p.getBoolean("dnd", false)
+        _autoAnswerEnabled.value = p.getBoolean("auto_ans", false)
+        _stunServer.value = p.getString("stun_server", "stun.l.google.com:19302") ?: "stun.l.google.com:19302"
+        _keepAliveSec.value = p.getInt("keep_alive", 10)
     }
 
     fun iterate() {
@@ -200,7 +472,7 @@ object SipManager {
         user: String,
         pass: String,
         port: Int,
-        useTls: Boolean
+        transport: String
     ) {
         val cleanServer = server.trim()
         val cleanUser = user.trim()
@@ -208,7 +480,7 @@ object SipManager {
 
         val finalId = if (id.isNullOrEmpty()) UUID.randomUUID().toString() else id
         val finalLabel = label.trim().ifEmpty { "$cleanUser@$cleanServer" }
-        val newItem = SipAccountItem(finalId, finalLabel, cleanServer, cleanUser, pass, port, useTls)
+        val newItem = SipAccountItem(finalId, finalLabel, cleanServer, cleanUser, pass, port, transport)
 
         val current = _accounts.value.toMutableList()
         val idx = current.indexOfFirst { it.id == finalId }
@@ -228,10 +500,10 @@ object SipManager {
             ?.putString("user", item.username)
             ?.putString("pass", item.password)
             ?.putInt("port", item.port)
-            ?.putBoolean("tls", item.useTls)
+            ?.putString("transport", item.transport)
             ?.apply()
 
-        register(item.server, item.username, item.password, item.port, item.useTls)
+        register(item.server, item.username, item.password, item.port, item.transport)
     }
 
     fun deleteAccount(id: String) {
@@ -247,7 +519,7 @@ object SipManager {
         }
     }
 
-    fun register(server: String, user: String, pass: String, port: Int, useTls: Boolean) {
+    fun register(server: String, user: String, pass: String, port: Int, transportMode: String) {
         val c = core ?: return
         c.clearAccounts()
         c.clearAllAuthInfo()
@@ -261,8 +533,8 @@ object SipManager {
 
         val accountParams = c.createAccountParams()
         val identity = Factory.instance().createAddress("sip:$cleanUser@$cleanServer")
-        val transport = if (useTls) "tls" else "udp"
-        val serverAddr = Factory.instance().createAddress("sip:$cleanServer:$port;transport=$transport")
+        val trans = transportMode.lowercase(Locale.US)
+        val serverAddr = Factory.instance().createAddress("sip:$cleanServer:$port;transport=$trans")
 
         if (identity != null && serverAddr != null) {
             accountParams.identityAddress = identity
@@ -276,21 +548,22 @@ object SipManager {
         }
     }
 
-    fun makeCall(target: String) {
+    fun makeCall(target: String, isVideo: Boolean = false) {
         val c = core ?: return
         val cleanNumber = target.trim().replace(" ", "")
         if (cleanNumber.isEmpty()) return
 
-        // যদি আগে থেকেই ১টি কল চালু থাকে, তবে সেটিকে Hold করে ২য় কল শুরু করবে (Add Call)
         if (c.callsNb > 0) {
+            currentSessionNumber = "$currentSessionNumber & $cleanNumber"
             c.calls.forEach { existingCall ->
                 if (existingCall.state == Call.State.StreamsRunning) {
                     existingCall.pause()
                 }
             }
+        } else {
+            currentSessionNumber = cleanNumber
+            currentSessionDir = if (isVideo) "Video Outgoing" else "Outgoing"
         }
-
-        addHistory(cleanNumber, "Outgoing")
 
         val domain = c.defaultAccount?.params?.identityAddress?.domain ?: return
         val address = if (cleanNumber.startsWith("sip:")) {
@@ -302,12 +575,55 @@ object SipManager {
         if (address != null) {
             val params = c.createCallParams(null)
             params?.isAudioEnabled = true
-            params?.isVideoEnabled = false
+            params?.isVideoEnabled = isVideo
+            _isVideoCall.value = isVideo
             c.inviteAddressWithParams(address, params!!)
         }
     }
 
-    // কল চলাকালীন Add Call বাটনে চাপলে ১ম কল Hold করে নতুন নম্বর ডায়াল করার স্ক্রিন খুলবে
+    fun sendMessage(target: String, text: String, viaSimSms: Boolean): Boolean {
+        val cleanTarget = target.trim().replace(" ", "")
+        val cleanText = text.trim()
+        if (cleanTarget.isEmpty() || cleanText.isEmpty()) return false
+
+        if (viaSimSms) {
+            return try {
+                val ctx = appContext ?: return false
+                val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    ctx.getSystemService(SmsManager::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    SmsManager.getDefault()
+                }
+                val parts = smsManager.divideMessage(cleanText)
+                smsManager.sendMultipartTextMessage(cleanTarget, null, parts, null, null)
+                saveMessage(cleanTarget, cleanText, isOutgoing = true, channel = "SIM SMS")
+                true
+            } catch (e: Exception) {
+                false
+            }
+        } else {
+            val c = core ?: return false
+            val account = c.defaultAccount ?: return false
+            val domain = account.params.identityAddress?.domain ?: return false
+            val peerAddr = if (cleanTarget.startsWith("sip:")) {
+                Factory.instance().createAddress(cleanTarget)
+            } else {
+                Factory.instance().createAddress("sip:$cleanTarget@$domain")
+            } ?: return false
+
+            val roomParams = c.createDefaultChatRoomParams()
+            val room = c.searchChatRoom(roomParams, account.params.identityAddress, peerAddr, arrayOf(peerAddr))
+                ?: c.createChatRoom(roomParams, account.params.identityAddress, arrayOf(peerAddr))
+                ?: return false
+
+            val msg = room.createMessageFromUtf8(cleanText)
+            msg.send()
+            saveMessage(cleanTarget, cleanText, isOutgoing = true, channel = "SIP")
+            return true
+        }
+    }
+
     fun prepareAddCall() {
         val c = core ?: return
         c.currentCall?.pause()
@@ -321,7 +637,6 @@ object SipManager {
         _isOnHold.value = false
     }
 
-    // ২য় জন কল রিসিভ করার পর Merge চাপলে আপনিসহ ৩ জন একসাথে কনফারেন্সে যুক্ত হবেন
     fun mergeCallsToConference() {
         val c = core ?: return
         if (c.callsNb >= 2) {
@@ -330,19 +645,44 @@ object SipManager {
             val conf = c.createConferenceWithParams(confParams!!)
             conf?.addParticipants(c.calls)
             _isInConference.value = true
+            startLiveTimerIfNotRunning()
         }
     }
 
-    fun answerCall() {
-        core?.currentCall?.accept()
+    fun transferCall(target: String) {
+        val c = core ?: return
+        val call = c.currentCall ?: return
+        val clean = target.trim().replace(" ", "")
+        if (clean.isEmpty()) return
+        val domain = c.defaultAccount?.params?.identityAddress?.domain ?: return
+        val destAddr = Factory.instance().createAddress("sip:$clean@$domain")
+        if (destAddr != null) {
+            call.transferTo(destAddr)
+        }
+    }
+
+    fun answerCall(withVideo: Boolean = _isVideoCall.value) {
+        val c = core ?: return
+        val call = c.currentCall ?: return
+        val params = c.createCallParams(call)
+        if (params != null) {
+            params.isAudioEnabled = true
+            params.isVideoEnabled = withVideo
+            call.acceptWithParams(params)
+        } else {
+            call.accept()
+        }
     }
 
     fun hangup() {
         val c = core ?: return
         if (c.callsNb > 0) {
             c.terminateAllCalls()
+        } else {
+            stopLiveTimerAndGetFormatted()
         }
         _callState.value = "Idle"
+        _isVideoCall.value = false
         _isAddingCall.value = false
         _isInConference.value = false
     }
@@ -396,6 +736,49 @@ object SipManager {
         }
     }
 
+    private fun saveMessage(peer: String, body: String, isOutgoing: Boolean, channel: String) {
+        val time = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date())
+        val item = ChatMessageItem(UUID.randomUUID().toString(), peer, body, isOutgoing, channel, time)
+        val updated = listOf(item) + _messages.value.take(100)
+        _messages.value = updated
+
+        val arr = JSONArray()
+        updated.forEach { m ->
+            val o = JSONObject()
+            o.put("id", m.id)
+            o.put("peer", m.peer)
+            o.put("body", m.body)
+            o.put("out", m.isOutgoing)
+            o.put("ch", m.channel)
+            o.put("time", m.time)
+            arr.put(o)
+        }
+        appContext?.getSharedPreferences("sip_msgs", Context.MODE_PRIVATE)
+            ?.edit()?.putString("msgs_json", arr.toString())?.apply()
+    }
+
+    private fun loadMessages() {
+        val raw = appContext?.getSharedPreferences("sip_msgs", Context.MODE_PRIVATE)?.getString("msgs_json", "") ?: ""
+        if (raw.isNotEmpty()) {
+            val arr = JSONArray(raw)
+            val list = mutableListOf<ChatMessageItem>()
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                list.add(
+                    ChatMessageItem(
+                        id = o.getString("id"),
+                        peer = o.getString("peer"),
+                        body = o.getString("body"),
+                        isOutgoing = o.getBoolean("out"),
+                        channel = o.optString("ch", "SIP"),
+                        time = o.getString("time")
+                    )
+                )
+            }
+            _messages.value = list
+        }
+    }
+
     private fun persistAccounts() {
         val arr = JSONArray()
         _accounts.value.forEach { acc ->
@@ -406,7 +789,7 @@ object SipManager {
             obj.put("username", acc.username)
             obj.put("password", acc.password)
             obj.put("port", acc.port)
-            obj.put("useTls", acc.useTls)
+            obj.put("transport", acc.transport)
             arr.put(obj)
         }
         appContext?.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
@@ -432,36 +815,23 @@ object SipManager {
                         username = o.getString("username"),
                         password = o.getString("password"),
                         port = o.optInt("port", 5060),
-                        useTls = o.optBoolean("useTls", false)
+                        transport = o.optString("transport", if (o.optBoolean("useTls", false)) "TLS" else "UDP")
                     )
                 )
             }
             _accounts.value = list
-        } else {
-            // পুরনো সেভ করা ১টি অ্যাকাউন্ট থাকলে সেটিকে লিস্টে মাইগ্রেট করা
-            val s = prefs.getString("server", "") ?: ""
-            val u = prefs.getString("user", "") ?: ""
-            val p = prefs.getString("pass", "") ?: ""
-            val port = prefs.getInt("port", 5060)
-            val tls = prefs.getBoolean("tls", false)
-            if (s.isNotEmpty() && u.isNotEmpty()) {
-                val migrated = SipAccountItem(UUID.randomUUID().toString(), "$u@$s", s, u, p, port, tls)
-                _accounts.value = listOf(migrated)
-                _activeAccountId.value = migrated.id
-                persistAccounts()
-            }
         }
     }
 
-    private fun addHistory(number: String, type: String) {
+    private fun addHistory(number: String, type: String, duration: String) {
         val time = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date())
         val current = _recentCalls.value.toMutableList()
-        current.add(0, CallHistoryItem(number, type, time))
+        current.add(0, CallHistoryItem(number, type, time, duration))
         val trimmed = current.take(50)
         _recentCalls.value = trimmed
 
         val prefs = appContext?.getSharedPreferences("sip_history", Context.MODE_PRIVATE) ?: return
-        val serialized = trimmed.joinToString("||") { "${it.number}::${it.type}::${it.time}" }
+        val serialized = trimmed.joinToString("||") { "${it.number}::${it.type}::${it.time}::${it.duration}" }
         prefs.edit().putString("logs", serialized).apply()
     }
 
@@ -471,7 +841,11 @@ object SipManager {
         if (raw.isNotEmpty()) {
             _recentCalls.value = raw.split("||").mapNotNull {
                 val parts = it.split("::")
-                if (parts.size == 3) CallHistoryItem(parts[0], parts[1], parts[2]) else null
+                when {
+                    parts.size >= 4 -> CallHistoryItem(parts[0], parts[1], parts[2], parts[3])
+                    parts.size == 3 -> CallHistoryItem(parts[0], parts[1], parts[2], "00:00")
+                    else -> null
+                }
             }
         }
     }

@@ -21,9 +21,8 @@ class SipForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(1001, buildNotification("Love SIP Connected"))
+        startForeground(1001, buildNotification("Love SIP Active in Background"))
 
-        // অ্যাপ ব্যাকগ্রাউন্ডে বা কিল হওয়ার পরও অটো-কানেক্ট রাখার জন্য
         SipManager.init(this)
         autoRegisterFromPrefs()
 
@@ -40,12 +39,10 @@ class SipForegroundService : Service() {
         if (SipManager.regState.value != "Online") {
             autoRegisterFromPrefs()
         }
-        // অ্যাপ কিল করলে Android যেন নিজে থেকেই সার্ভিসটি আবার চালু করে দেয়
         return START_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // রিসেন্ট অ্যাপস থেকে সোয়াইপ করে কেটে দিলেও সার্ভিসটি পুনরায় চালু রাখার ব্যবস্থা
         val restartIntent = Intent(applicationContext, SipForegroundService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             applicationContext.startForegroundService(restartIntent)
@@ -61,9 +58,9 @@ class SipForegroundService : Service() {
         val user = prefs.getString("user", "") ?: ""
         val pass = prefs.getString("pass", "") ?: ""
         val port = prefs.getInt("port", 5060)
-        val tls = prefs.getBoolean("tls", false)
+        val transport = prefs.getString("transport", "UDP") ?: "UDP"
         if (server.isNotEmpty() && user.isNotEmpty()) {
-            SipManager.register(server, user, pass, port, tls)
+            SipManager.register(server, user, pass, port, transport)
         }
     }
 

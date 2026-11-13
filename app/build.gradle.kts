@@ -65,5 +65,8 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.extended)
 
+    // Linphone SIP & VoIP Engine (Supports TLS, Opus, STUN/TURN, 3-Way Conference & Recording)
+    implementation("org.linphone:linphone-sdk-android:5.3.+")
+
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

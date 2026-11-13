@@ -50,6 +50,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         SipManager.init(this)
 
+        // ব্যাকগ্রাউন্ড সার্ভিস চালু রাখা যাতে রিসেন্ট অ্যাপ থেকে কেটে দিলেও কানেকশন না কাটে
         val serviceIntent = Intent(this, SipForegroundService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(serviceIntent)
@@ -57,13 +58,15 @@ class MainActivity : ComponentActivity() {
             startService(serviceIntent)
         }
 
+        // অ্যাপে ঢুকলে আগে থেকে Online থাকলে নতুন করে রিকানেক্ট না করে সরাসরি Online দেখাবে,
+        // আর ডিসকানেক্ট থাকলে সাথে সাথে অটো-কানেক্ট করে নেবে
         val prefs = getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
         val savedServer = prefs.getString("server", "") ?: ""
         val savedUser = prefs.getString("user", "") ?: ""
         val savedPass = prefs.getString("pass", "") ?: ""
         val savedPort = prefs.getInt("port", 5060)
         val savedTls = prefs.getBoolean("tls", false)
-        if (savedServer.isNotEmpty() && savedUser.isNotEmpty()) {
+        if (savedServer.isNotEmpty() && savedUser.isNotEmpty() && SipManager.regState.value != "Online") {
             SipManager.register(savedServer, savedUser, savedPass, savedPort, savedTls)
         }
 
@@ -71,6 +74,23 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 LoveCallingApp()
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // অ্যাপ মিনিমাইজ বা স্ক্রিন অফ থেকে আবার ওপেন করলে কানেকশন চেক করা
+        val prefs = getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
+        val savedServer = prefs.getString("server", "") ?: ""
+        val savedUser = prefs.getString("user", "") ?: ""
+        val savedPass = prefs.getString("pass", "") ?: ""
+        val savedPort = prefs.getInt("port", 5060)
+        val savedTls = prefs.getBoolean("tls", false)
+        if (savedServer.isNotEmpty() && savedUser.isNotEmpty() &&
+            SipManager.regState.value != "Online" &&
+            !SipManager.regState.value.startsWith("Connecting")
+        ) {
+            SipManager.register(savedServer, savedUser, savedPass, savedPort, savedTls)
         }
     }
 }
@@ -205,7 +225,7 @@ fun IphoneDialpadScreen() {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // Number Display + Copy/Paste Bar
+        // নম্বর ডিসপ্লে এবং কপি-পেস্ট বার
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -251,7 +271,7 @@ fun IphoneDialpadScreen() {
             )
         }
 
-        // Large iPhone Style Round Keypad
+        // বড় আইফোন স্টাইল গোল ডায়ালপ্যাড বাটন
         Column(
             verticalArrangement = Arrangement.spacedBy(14.dp),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -282,7 +302,7 @@ fun IphoneDialpadScreen() {
             }
         }
 
-        // Bottom Call + Conference + Backspace Row
+        // নিচের গ্রুপ কল, সবুজ কল বাটন এবং ব্যাকস্পেস
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -290,7 +310,6 @@ fun IphoneDialpadScreen() {
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 3-Way Group Call Button
             IconButton(
                 onClick = { SipManager.makeCall("8000") },
                 modifier = Modifier
@@ -301,7 +320,6 @@ fun IphoneDialpadScreen() {
                 Icon(Icons.Default.Groups, contentDescription = "Group Call", tint = Color.White)
             }
 
-            // Big Green iPhone Call Button
             Box(
                 modifier = Modifier
                     .size(78.dp)
@@ -317,7 +335,6 @@ fun IphoneDialpadScreen() {
                 Icon(Icons.Default.Call, contentDescription = "Call", tint = Color.White, modifier = Modifier.size(36.dp))
             }
 
-            // Backspace Button
             IconButton(
                 onClick = {
                     if (dialedNumber.isNotEmpty()) {
@@ -492,7 +509,6 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
                 }
             }
         } else {
-            // PortSIP UC Style In-Call Controls (Mute, Keypad, Speaker, Hold, Record, Conference)
             Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
                     CallActionBtn("Mute", Icons.Default.MicOff, isMuted) { SipManager.toggleMute() }

@@ -1,6 +1,10 @@
 package com.love.calling.sip
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.telephony.SmsManager
 import android.view.TextureView
@@ -50,6 +54,7 @@ data class CodecToggleItem(
 object SipManager {
     private var core: Core? = null
     private var appContext: Context? = null
+    private var networkCallbackRegistered = false
 
     private val managerScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var timerJob: Job? = null
@@ -106,7 +111,11 @@ object SipManager {
     private val _activeAccountId = MutableStateFlow("")
     val activeAccountId: StateFlow<String> = _activeAccountId.asStateFlow()
 
-    private val _allowIpv6 = MutableStateFlow(false)
+    // Teletalk SIM & Network Settings (Screenshot-2 Match: Use WiFi Only=OFF, Allow IPv6=ON, Random Port=ON)
+    private val _useWifiOnly = MutableStateFlow(false)
+    val useWifiOnly: StateFlow<Boolean> = _useWifiOnly.asStateFlow()
+
+    private val _allowIpv6 = MutableStateFlow(true)
     val allowIpv6: StateFlow<Boolean> = _allowIpv6.asStateFlow()
 
     private val _useRandomPort = MutableStateFlow(true)
@@ -339,6 +348,74 @@ object SipManager {
         c.addListener(coreListener)
         c.start()
         core = c
+
+        registerNetworkWatcher()
+    }
+
+    // Wi-Fi থেকে Teletalk SIM MB বা যেকোনো নেটওয়ার্কে গেলে অটোমেটিক রিকানেক্ট করবে
+    private fun registerNetworkWatcher() {
+        if (networkCallbackRegistered) return
+        val ctx = appContext ?: return
+        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val req = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+
+        cm.registerNetworkCallback(req, object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                managerScope.launch {
+                    delay(800L)
+                    forceNetworkRebind()
+                }
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                val isWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                if (_useWifiOnly.value && !isWifi) {
+                    core?.isNetworkReachable = false
+                    _regState.value = "WiFi Only Mode"
+                } else {
+                    if (core?.isNetworkReachable == false) {
+                        forceNetworkRebind()
+                    }
+                }
+            }
+        })
+        networkCallbackRegistered = true
+    }
+
+    fun forceNetworkRebind() {
+        val c = core ?: return
+        val ctx = appContext ?: return
+
+        if (_useWifiOnly.value) {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            val activeNet = cm?.activeNetwork
+            val caps = cm?.getNetworkCapabilities(activeNet)
+            if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) != true) {
+                c.isNetworkReachable = false
+                _regState.value = "WiFi Only Mode"
+                return
+            }
+        }
+
+        applyNetworkPolicies(c)
+        c.isNetworkReachable = false
+        c.isNetworkReachable = true
+
+        if (c.accountList.isNotEmpty()) {
+            c.refreshRegisters()
+        } else {
+            val prefs = ctx.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
+            val s = prefs.getString("server", "") ?: ""
+            val u = prefs.getString("user", "") ?: ""
+            val p = prefs.getString("pass", "") ?: ""
+            val port = prefs.getInt("port", 5060)
+            val tr = prefs.getString("transport", "UDP") ?: "UDP"
+            if (s.isNotEmpty() && u.isNotEmpty()) {
+                register(s, u, p, port, tr)
+            }
+        }
     }
 
     fun refreshCodecList(targetCore: Core? = core) {
@@ -382,9 +459,11 @@ object SipManager {
     fun applyNetworkPolicies(targetCore: Core? = core) {
         val c = targetCore ?: return
 
+        // Teletalk SIM IPv6 + IPv4 Dual-Stack Support
         c.isIpv6Enabled = _allowIpv6.value
         c.config.setBool("net", "allow_ipv6", _allowIpv6.value)
 
+        // Random Local Port (Bypasses Teletalk & Mobile CGNAT Port Blocks)
         val transports = c.transports
         if (_useRandomPort.value) {
             transports.udpPort = -1
@@ -397,13 +476,16 @@ object SipManager {
         }
         c.transports = transports
 
+        // Symmetric RTP & Force Rport
         c.config.setBool("rtp", "symmetric", _enableRportSymmetric.value)
         c.config.setBool("sip", "rport", _enableRportSymmetric.value)
         c.config.setBool("sip", "use_rport", _enableRportSymmetric.value)
 
+        // Fast NAT Keep-Alive for Mobile Data
         c.isKeepAliveEnabled = true
         c.config.setInt("sip", "keep_alive_period", _keepAliveSec.value * 1000)
 
+        // STUN & ICE NAT Traversal
         val natPolicy = c.createNatPolicy()
         natPolicy.stunServer = _stunServer.value.trim().ifEmpty { "stun.l.google.com:19302" }
         natPolicy.isStunEnabled = _enableStunIce.value
@@ -412,6 +494,7 @@ object SipManager {
     }
 
     fun updateAdvancedSettings(
+        wifiOnly: Boolean,
         ipv6: Boolean,
         randomPort: Boolean,
         stunIce: Boolean,
@@ -421,6 +504,7 @@ object SipManager {
         stunHost: String,
         keepAlive: Int
     ) {
+        _useWifiOnly.value = wifiOnly
         _allowIpv6.value = ipv6
         _useRandomPort.value = randomPort
         _enableStunIce.value = stunIce
@@ -431,6 +515,7 @@ object SipManager {
         _keepAliveSec.value = keepAlive.coerceIn(5, 120)
 
         appContext?.getSharedPreferences("sip_adv_prefs", Context.MODE_PRIVATE)?.edit()
+            ?.putBoolean("wifi_only", wifiOnly)
             ?.putBoolean("allow_ipv6", ipv6)
             ?.putBoolean("random_port", randomPort)
             ?.putBoolean("stun_ice", stunIce)
@@ -446,12 +531,15 @@ object SipManager {
         val activeAcc = _accounts.value.firstOrNull { it.id == _activeAccountId.value }
         if (activeAcc != null) {
             activateAccount(activeAcc)
+        } else {
+            forceNetworkRebind()
         }
     }
 
     private fun loadSettings() {
         val p = appContext?.getSharedPreferences("sip_adv_prefs", Context.MODE_PRIVATE) ?: return
-        _allowIpv6.value = p.getBoolean("allow_ipv6", false)
+        _useWifiOnly.value = p.getBoolean("wifi_only", false)
+        _allowIpv6.value = p.getBoolean("allow_ipv6", true)
         _useRandomPort.value = p.getBoolean("random_port", true)
         _enableStunIce.value = p.getBoolean("stun_ice", true)
         _enableRportSymmetric.value = p.getBoolean("rport_sym", true)
@@ -521,6 +609,7 @@ object SipManager {
 
     fun register(server: String, user: String, pass: String, port: Int, transportMode: String) {
         val c = core ?: return
+        applyNetworkPolicies(c)
         c.clearAccounts()
         c.clearAllAuthInfo()
 

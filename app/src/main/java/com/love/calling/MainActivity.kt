@@ -54,16 +54,24 @@ import com.love.calling.sip.*
 
 data class PhoneContact(val name: String, val number: String)
 
+// নতুন Stylish & Premium Royal Sapphire Aurora থিম
 val PremiumBgBrush = Brush.verticalGradient(
     colors = listOf(
-        Color(0xFF1D0B24),
-        Color(0xFF0E121D),
-        Color(0xFF07080C)
+        Color(0xFF0A192F), // ডিপ রয়্যাল স্যাফায়ার ব্লু
+        Color(0xFF13112B), // মিডনাইট ইন্ডিগো ভায়োলেট
+        Color(0xFF070A12)  // অবসিডিয়ান ডার্ক
     )
 )
-val GlassCardColor = Color(0xFF1B1F2E).copy(alpha = 0.82f)
-val GlassBorderColor = Color(0xFFFF2E63).copy(alpha = 0.28f)
-val AccentPink = Color(0xFFFF2E63)
+val DialButtonBrush = Brush.verticalGradient(
+    colors = listOf(
+        Color(0xFF1E2942).copy(alpha = 0.92f),
+        Color(0xFF121829).copy(alpha = 0.95f)
+    )
+)
+val GlassCardColor = Color(0xFF162038).copy(alpha = 0.85f)
+val GlassBorderColor = Color(0xFF38BDF8).copy(alpha = 0.32f)
+val AccentPrimary = Color(0xFF00E5FF) // প্রিমিয়াম ইলেকট্রিক সায়ান
+val AccentRose = Color(0xFFFF2E63)    // লাভ রোজ অ্যাকসেন্ট
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,10 +85,10 @@ class MainActivity : ComponentActivity() {
             startService(serviceIntent)
         }
 
-        autoConnectIfNeeded()
+        SipManager.forceNetworkRebind()
 
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme(primary = AccentPink)) {
+            MaterialTheme(colorScheme = darkColorScheme(primary = AccentPrimary)) {
                 LoveCallingApp()
             }
         }
@@ -88,22 +96,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        autoConnectIfNeeded()
-    }
-
-    private fun autoConnectIfNeeded() {
-        val prefs = getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
-        val savedServer = prefs.getString("server", "") ?: ""
-        val savedUser = prefs.getString("user", "") ?: ""
-        val savedPass = prefs.getString("pass", "") ?: ""
-        val savedPort = prefs.getInt("port", 5060)
-        val savedTransport = prefs.getString("transport", "UDP") ?: "UDP"
-        if (savedServer.isNotEmpty() && savedUser.isNotEmpty() &&
-            SipManager.regState.value != "Online" &&
-            !SipManager.regState.value.startsWith("Connecting")
-        ) {
-            SipManager.register(savedServer, savedUser, savedPass, savedPort, savedTransport)
-        }
+        // অ্যাপে ঢুকলেই SIM MB বা Wi-Fi চেক করে অটো-কানেক্ট করবে
+        SipManager.forceNetworkRebind()
     }
 }
 
@@ -155,17 +149,18 @@ fun LoveCallingApp() {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF140B19).copy(alpha = 0.96f))
+                    .background(Color(0xFF0B162C).copy(alpha = 0.96f))
+                    .statusBarsPadding() // স্ট্যাটাস বারের ঘড়ি/ব্যাটারির নিচে পরিষ্কারভাবে বসবে
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Favorite, contentDescription = null, tint = AccentPink, modifier = Modifier.size(22.dp))
+                        Icon(Icons.Default.Favorite, contentDescription = null, tint = AccentRose, modifier = Modifier.size(22.dp))
                         Spacer(Modifier.width(8.dp))
                         Text("Love SIP", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
                         if (dndEnabled) {
@@ -192,12 +187,13 @@ fun LoveCallingApp() {
                         modifier = Modifier
                             .clip(RoundedCornerShape(20.dp))
                             .background(badgeColor.copy(alpha = 0.18f))
-                            .border(1.dp, badgeColor.copy(alpha = 0.45f), RoundedCornerShape(20.dp))
-                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                            .border(1.dp, badgeColor.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+                            .clickable { SipManager.forceNetworkRebind() }
+                            .padding(horizontal = 12.dp, vertical = 5.dp)
                     ) {
                         Box(Modifier.size(8.dp).clip(CircleShape).background(badgeColor))
                         Spacer(Modifier.width(6.dp))
-                        Text(regState, color = badgeColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text(regState, color = badgeColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
 
@@ -219,7 +215,7 @@ fun LoveCallingApp() {
             }
         },
         bottomBar = {
-            NavigationBar(containerColor = Color(0xFF100C18)) {
+            NavigationBar(containerColor = Color(0xFF091224)) {
                 NavigationBarItem(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
@@ -266,7 +262,7 @@ fun LoveCallingApp() {
                 .padding(innerPadding)
         ) {
             when (selectedTab) {
-                0 -> IphoneDialpadScreen()
+                0 -> StandardLargeDialpadScreen()
                 1 -> RecentsScreen()
                 2 -> MessagingScreen()
                 3 -> ContactsScreen(hasPermission = hasContactsPerm, onRequestPerm = { launcher.launch(permissions) })
@@ -278,7 +274,7 @@ fun LoveCallingApp() {
 }
 
 @Composable
-fun IphoneDialpadScreen() {
+fun StandardLargeDialpadScreen() {
     var dialedNumber by remember { mutableStateOf("") }
     val clipboard = LocalClipboardManager.current
 
@@ -292,10 +288,11 @@ fun IphoneDialpadScreen() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = 4.dp),
+            .padding(horizontal = 16.dp, vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
+        // নম্বর ডিসপ্লে এবং কপি-পেস্ট বার
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = {
@@ -304,13 +301,13 @@ fun IphoneDialpadScreen() {
                         dialedNumber += clip.filter { it.isDigit() || it == '+' || it == '*' || it == '#' }
                     }
                 }) {
-                    Icon(Icons.Default.ContentPaste, contentDescription = "Paste", modifier = Modifier.size(16.dp), tint = AccentPink)
+                    Icon(Icons.Default.ContentPaste, contentDescription = "Paste", modifier = Modifier.size(16.dp), tint = AccentPrimary)
                     Spacer(Modifier.width(4.dp))
                     Text("Paste", fontSize = 13.sp, color = Color.White)
                 }
                 if (dialedNumber.isNotEmpty()) {
                     TextButton(onClick = { clipboard.setText(AnnotatedString(dialedNumber)) }) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp), tint = AccentPink)
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp), tint = AccentPrimary)
                         Spacer(Modifier.width(4.dp))
                         Text("Copy", fontSize = 13.sp, color = Color.White)
                     }
@@ -322,13 +319,13 @@ fun IphoneDialpadScreen() {
                 onValueChange = { dialedNumber = it },
                 modifier = Modifier.fillMaxWidth(),
                 textStyle = LocalTextStyle.current.copy(
-                    fontSize = 32.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 36.sp,
+                    fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
                     color = Color.White
                 ),
                 placeholder = {
-                    Text("Enter Number", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = Color.Gray)
+                    Text("Enter Number", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = Color(0xFF7F8FA6), fontSize = 26.sp)
                 },
                 singleLine = true,
                 colors = OutlinedTextFieldDefaults.colors(
@@ -338,23 +335,24 @@ fun IphoneDialpadScreen() {
             )
         }
 
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        // স্ট্যান্ডার্ড বড় ডায়ালপ্যাড (84.dp বাটন, আরামদায়ক স্পেসিং)
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             keys.forEach { row ->
-                Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(horizontalArrangement = Arrangement.spacedBy(22.dp), verticalAlignment = Alignment.CenterVertically) {
                     row.forEach { (digit, letters) ->
                         Box(
                             modifier = Modifier
-                                .size(74.dp)
+                                .size(84.dp)
                                 .clip(CircleShape)
-                                .background(GlassCardColor)
-                                .border(1.dp, GlassBorderColor, CircleShape)
+                                .background(DialButtonBrush)
+                                .border(1.2.dp, GlassBorderColor, CircleShape)
                                 .clickable { dialedNumber += digit },
                             contentAlignment = Alignment.Center
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(digit, fontSize = 29.sp, fontWeight = FontWeight.Medium, color = Color.White)
+                                Text(digit, fontSize = 34.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
                                 if (letters.isNotEmpty()) {
-                                    Text(letters, fontSize = 9.sp, color = Color.LightGray, letterSpacing = 1.sp)
+                                    Text(letters, fontSize = 10.sp, color = AccentPrimary.copy(alpha = 0.85f), letterSpacing = 1.2.sp, fontWeight = FontWeight.Medium)
                                 }
                             }
                         }
@@ -363,17 +361,18 @@ fun IphoneDialpadScreen() {
             }
         }
 
+        // নিচের অ্যাকশন বাটন সারি
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 8.dp),
+                .padding(bottom = 10.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
                 onClick = { SipManager.makeCall("8000", isVideo = false) },
                 modifier = Modifier
-                    .size(50.dp)
+                    .size(54.dp)
                     .clip(CircleShape)
                     .background(GlassCardColor)
                     .border(1.dp, GlassBorderColor, CircleShape)
@@ -383,9 +382,9 @@ fun IphoneDialpadScreen() {
 
             Box(
                 modifier = Modifier
-                    .size(68.dp)
+                    .size(72.dp)
                     .clip(CircleShape)
-                    .background(Brush.linearGradient(listOf(Color(0xFF2ECC71), Color(0xFF27AE60))))
+                    .background(Brush.linearGradient(listOf(Color(0xFF00E676), Color(0xFF00C853))))
                     .clickable {
                         if (dialedNumber.isNotEmpty()) {
                             SipManager.makeCall(dialedNumber, isVideo = false)
@@ -393,14 +392,14 @@ fun IphoneDialpadScreen() {
                     },
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.Call, contentDescription = "Audio Call", tint = Color.White, modifier = Modifier.size(32.dp))
+                Icon(Icons.Default.Call, contentDescription = "Audio Call", tint = Color.White, modifier = Modifier.size(34.dp))
             }
 
             Box(
                 modifier = Modifier
-                    .size(62.dp)
+                    .size(64.dp)
                     .clip(CircleShape)
-                    .background(Brush.linearGradient(listOf(Color(0xFF3498DB), Color(0xFF2980B9))))
+                    .background(Brush.linearGradient(listOf(Color(0xFF38BDF8), Color(0xFF0284C7))))
                     .clickable {
                         if (dialedNumber.isNotEmpty()) {
                             SipManager.makeCall(dialedNumber, isVideo = true)
@@ -408,7 +407,7 @@ fun IphoneDialpadScreen() {
                     },
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.Videocam, contentDescription = "Video Call", tint = Color.White, modifier = Modifier.size(28.dp))
+                Icon(Icons.Default.Videocam, contentDescription = "Video Call", tint = Color.White, modifier = Modifier.size(30.dp))
             }
 
             IconButton(
@@ -417,9 +416,9 @@ fun IphoneDialpadScreen() {
                         dialedNumber = dialedNumber.dropLast(1)
                     }
                 },
-                modifier = Modifier.size(50.dp)
+                modifier = Modifier.size(54.dp)
             ) {
-                Icon(Icons.AutoMirrored.Filled.Backspace, contentDescription = "Delete", tint = Color.LightGray, modifier = Modifier.size(26.dp))
+                Icon(Icons.AutoMirrored.Filled.Backspace, contentDescription = "Delete", tint = Color.LightGray, modifier = Modifier.size(28.dp))
             }
         }
     }
@@ -487,7 +486,7 @@ fun MessagingScreen() {
                 modifier = Modifier
                     .size(52.dp)
                     .clip(CircleShape)
-                    .background(AccentPink)
+                    .background(AccentRose)
             ) {
                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = Color.White)
             }
@@ -508,7 +507,7 @@ fun MessagingScreen() {
                     shape = RoundedCornerShape(14.dp),
                     border = BorderStroke(1.dp, GlassBorderColor),
                     colors = CardDefaults.cardColors(
-                        containerColor = if (msg.isOutgoing) Color(0xFF2A1635) else GlassCardColor
+                        containerColor = if (msg.isOutgoing) Color(0xFF1D2D50) else GlassCardColor
                     )
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
@@ -517,7 +516,7 @@ fun MessagingScreen() {
                                 if (msg.isOutgoing) "To: ${msg.peer}" else "From: ${msg.peer}",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = AccentPink
+                                color = AccentPrimary
                             )
                             Text("${msg.channel} • ${msg.time}", fontSize = 11.sp, color = Color.LightGray)
                         }
@@ -567,9 +566,9 @@ fun RecentsScreen() {
                         }
                         val tint = when {
                             item.type.startsWith("Missed") -> Color(0xFFE74C3C)
-                            item.type.contains("Video") -> Color(0xFF3498DB)
-                            item.type.contains("Incoming") -> Color(0xFF3498DB)
-                            item.type == "Conference" -> AccentPink
+                            item.type.contains("Video") -> AccentPrimary
+                            item.type.contains("Incoming") -> AccentPrimary
+                            item.type == "Conference" -> AccentRose
                             else -> Color(0xFF2ECC71)
                         }
                         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
@@ -585,7 +584,7 @@ fun RecentsScreen() {
                             Icon(Icons.Default.Call, contentDescription = "Audio Call", tint = Color(0xFF2ECC71))
                         }
                         IconButton(onClick = { SipManager.makeCall(item.number, isVideo = true) }) {
-                            Icon(Icons.Default.Videocam, contentDescription = "Video Call", tint = Color(0xFF3498DB))
+                            Icon(Icons.Default.Videocam, contentDescription = "Video Call", tint = AccentPrimary)
                         }
                     }
                 }
@@ -677,7 +676,7 @@ fun ContactsScreen(hasPermission: Boolean, onRequestPerm: () -> Unit) {
                                 Icon(Icons.Default.Call, contentDescription = "Audio Call", tint = Color(0xFF2ECC71))
                             }
                             IconButton(onClick = { SipManager.makeCall(contact.number, isVideo = true) }) {
-                                Icon(Icons.Default.Videocam, contentDescription = "Video Call", tint = Color(0xFF3498DB))
+                                Icon(Icons.Default.Videocam, contentDescription = "Video Call", tint = AccentPrimary)
                             }
                         }
                     }
@@ -726,7 +725,7 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
         )
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(PremiumBgBrush)) {
+    Box(modifier = Modifier.fillMaxSize().background(PremiumBgBrush).statusBarsPadding()) {
         if (isVideoCall) {
             var remoteTex by remember { mutableStateOf<TextureView?>(null) }
             var previewTex by remember { mutableStateOf<TextureView?>(null) }
@@ -750,10 +749,10 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 36.dp, end = 16.dp)
+                    .padding(top = 24.dp, end = 16.dp)
                     .size(width = 110.dp, height = 155.dp)
                     .clip(RoundedCornerShape(14.dp))
-                    .border(1.5.dp, AccentPink, RoundedCornerShape(14.dp))
+                    .border(1.5.dp, AccentPrimary, RoundedCornerShape(14.dp))
             ) {
                 AndroidView(
                     factory = { ctx ->
@@ -774,7 +773,7 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 28.dp)) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 20.dp)) {
                 Text(
                     if (isInConference) "3-Way Conference" else remoteNumber,
                     fontSize = 26.sp,
@@ -869,9 +868,9 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
 
                     if (isVideoCall) {
                         Box(
-                            Modifier.size(70.dp).clip(CircleShape).background(Color(0xFF3498DB)).clickable { SipManager.answerCall(withVideo = true) },
+                            Modifier.size(70.dp).clip(CircleShape).background(AccentPrimary).clickable { SipManager.answerCall(withVideo = true) },
                             contentAlignment = Alignment.Center
-                        ) { Icon(Icons.Default.Videocam, "Video Answer", tint = Color.White, modifier = Modifier.size(30.dp)) }
+                        ) { Icon(Icons.Default.Videocam, "Video Answer", tint = Color.Black, modifier = Modifier.size(30.dp)) }
                     }
                 }
             } else {
@@ -898,7 +897,7 @@ fun CallActionBtn(label: String, icon: androidx.compose.ui.graphics.vector.Image
             modifier = Modifier
                 .size(62.dp)
                 .clip(CircleShape)
-                .background(if (active) AccentPink else GlassCardColor)
+                .background(if (active) AccentRose else GlassCardColor)
                 .border(1.dp, GlassBorderColor, CircleShape)
                 .clickable { onClick() },
             contentAlignment = Alignment.Center
@@ -1074,7 +1073,7 @@ fun MultiAccountScreen() {
                 port = "5060"
                 transport = "UDP"
             },
-            colors = ButtonDefaults.buttonColors(containerColor = AccentPink),
+            colors = ButtonDefaults.buttonColors(containerColor = AccentRose),
             shape = RoundedCornerShape(14.dp),
             modifier = Modifier.fillMaxWidth().height(52.dp)
         ) {
@@ -1092,6 +1091,7 @@ fun MultiAccountScreen() {
 
 @Composable
 fun AdvancedNetworkSettingsScreen() {
+    val initWifiOnly by SipManager.useWifiOnly.collectAsState()
     val initIpv6 by SipManager.allowIpv6.collectAsState()
     val initRandomPort by SipManager.useRandomPort.collectAsState()
     val initStunIce by SipManager.enableStunIce.collectAsState()
@@ -1102,6 +1102,7 @@ fun AdvancedNetworkSettingsScreen() {
     val initKeepAlive by SipManager.keepAliveSec.collectAsState()
     val audioCodecs by SipManager.audioCodecs.collectAsState()
 
+    var useWifiOnly by remember(initWifiOnly) { mutableStateOf(initWifiOnly) }
     var allowIpv6 by remember(initIpv6) { mutableStateOf(initIpv6) }
     var useRandomPort by remember(initRandomPort) { mutableStateOf(initRandomPort) }
     var enableStunIce by remember(initStunIce) { mutableStateOf(initStunIce) }
@@ -1119,20 +1120,27 @@ fun AdvancedNetworkSettingsScreen() {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("Network & SIM Bypass Settings", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        Text("Network (Teletalk SIM & Wi-Fi)", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
 
         SettingToggleCard(
-            title = "Use Random Local Port",
-            subtitle = "Recommended ON for Teletalk SIM & Random IP networks to prevent port blocks",
-            checked = useRandomPort,
-            onCheckedChange = { useRandomPort = it }
+            title = "Use WiFi only",
+            subtitle = "Keep OFF so calls work on Teletalk SIM Mobile Data (MB) as well as Wi-Fi",
+            checked = useWifiOnly,
+            onCheckedChange = { useWifiOnly = it }
         )
 
         SettingToggleCard(
             title = "Allow IPv6",
-            subtitle = "Keep OFF for Bangladeshi SIM mobile data (Teletalk/GP/Robi) to avoid UDP drops",
+            subtitle = "Keep ON for Teletalk SIM IPv6/IPv4 dual-stack mobile internet compatibility",
             checked = allowIpv6,
             onCheckedChange = { allowIpv6 = it }
+        )
+
+        SettingToggleCard(
+            title = "Use random ports",
+            subtitle = "Keep ON to bypass strict carrier NAT & port blocks on SIM mobile data",
+            checked = useRandomPort,
+            onCheckedChange = { useRandomPort = it }
         )
 
         SettingToggleCard(
@@ -1144,7 +1152,7 @@ fun AdvancedNetworkSettingsScreen() {
 
         SettingToggleCard(
             title = "Symmetric RTP & Force Rport",
-            subtitle = "Bypasses strict carrier CGNAT firewalls on mobile networks",
+            subtitle = "Keeps incoming/outgoing voice packets aligned through SIM CGNAT",
             checked = enableRportSym,
             onCheckedChange = { enableRportSym = it }
         )
@@ -1189,6 +1197,7 @@ fun AdvancedNetworkSettingsScreen() {
             onClick = {
                 val ka = keepAlive.toIntOrNull() ?: 10
                 SipManager.updateAdvancedSettings(
+                    wifiOnly = useWifiOnly,
                     ipv6 = allowIpv6,
                     randomPort = useRandomPort,
                     stunIce = enableStunIce,
@@ -1200,7 +1209,7 @@ fun AdvancedNetworkSettingsScreen() {
                 )
                 savedBanner = true
             },
-            colors = ButtonDefaults.buttonColors(containerColor = AccentPink),
+            colors = ButtonDefaults.buttonColors(containerColor = AccentRose),
             shape = RoundedCornerShape(14.dp),
             modifier = Modifier.fillMaxWidth().height(52.dp)
         ) {

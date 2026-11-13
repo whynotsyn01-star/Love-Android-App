@@ -54,12 +54,11 @@ import com.love.calling.sip.*
 
 data class PhoneContact(val name: String, val number: String)
 
-// নতুন Stylish & Premium Royal Sapphire Aurora থিম
 val PremiumBgBrush = Brush.verticalGradient(
     colors = listOf(
-        Color(0xFF0A192F), // ডিপ রয়্যাল স্যাফায়ার ব্লু
-        Color(0xFF13112B), // মিডনাইট ইন্ডিগো ভায়োলেট
-        Color(0xFF070A12)  // অবসিডিয়ান ডার্ক
+        Color(0xFF0A192F),
+        Color(0xFF13112B),
+        Color(0xFF070A12)
     )
 )
 val DialButtonBrush = Brush.verticalGradient(
@@ -70,8 +69,8 @@ val DialButtonBrush = Brush.verticalGradient(
 )
 val GlassCardColor = Color(0xFF162038).copy(alpha = 0.85f)
 val GlassBorderColor = Color(0xFF38BDF8).copy(alpha = 0.32f)
-val AccentPrimary = Color(0xFF00E5FF) // প্রিমিয়াম ইলেকট্রিক সায়ান
-val AccentRose = Color(0xFFFF2E63)    // লাভ রোজ অ্যাকসেন্ট
+val AccentPrimary = Color(0xFF00E5FF)
+val AccentRose = Color(0xFFFF2E63)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -96,7 +95,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // অ্যাপে ঢুকলেই SIM MB বা Wi-Fi চেক করে অটো-কানেক্ট করবে
         SipManager.forceNetworkRebind()
     }
 }
@@ -150,7 +148,7 @@ fun LoveCallingApp() {
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Color(0xFF0B162C).copy(alpha = 0.96f))
-                    .statusBarsPadding() // স্ট্যাটাস বারের ঘড়ি/ব্যাটারির নিচে পরিষ্কারভাবে বসবে
+                    .statusBarsPadding()
             ) {
                 Row(
                     modifier = Modifier
@@ -292,7 +290,6 @@ fun StandardLargeDialpadScreen() {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // নম্বর ডিসপ্লে এবং কপি-পেস্ট বার
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = {
@@ -335,7 +332,6 @@ fun StandardLargeDialpadScreen() {
             )
         }
 
-        // স্ট্যান্ডার্ড বড় ডায়ালপ্যাড (84.dp বাটন, আরামদায়ক স্পেসিং)
         Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             keys.forEach { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(22.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -361,7 +357,6 @@ fun StandardLargeDialpadScreen() {
             }
         }
 
-        // নিচের অ্যাকশন বাটন সারি
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1138,7 +1133,7 @@ fun AdvancedNetworkSettingsScreen() {
 
         SettingToggleCard(
             title = "Use random ports",
-            subtitle = "Keep ON to bypass strict carrier NAT & port blocks on SIM mobile data",
+            subtitle = "Keep ON to automatically bind all available UDP ports and bypass carrier blocks",
             checked = useRandomPort,
             onCheckedChange = { useRandomPort = it }
         )

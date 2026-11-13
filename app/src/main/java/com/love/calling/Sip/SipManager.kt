@@ -111,14 +111,14 @@ object SipManager {
     private val _activeAccountId = MutableStateFlow("")
     val activeAccountId: StateFlow<String> = _activeAccountId.asStateFlow()
 
-    // Teletalk SIM & Network Settings (Screenshot-2 Match: Use WiFi Only=OFF, Allow IPv6=ON, Random Port=ON)
+    // Network & All UDP Ports Configuration
     private val _useWifiOnly = MutableStateFlow(false)
     val useWifiOnly: StateFlow<Boolean> = _useWifiOnly.asStateFlow()
 
     private val _allowIpv6 = MutableStateFlow(true)
     val allowIpv6: StateFlow<Boolean> = _allowIpv6.asStateFlow()
 
-    private val _useRandomPort = MutableStateFlow(true)
+    private val _useRandomPort = MutableStateFlow(true) // ON থাকলে সিস্টেমে উপলব্ধ যেকোনো ফ্রী UDP পোর্ট স্বয়ংক্রিয়ভাবে নিয়ে নেবে
     val useRandomPort: StateFlow<Boolean> = _useRandomPort.asStateFlow()
 
     private val _enableStunIce = MutableStateFlow(true)
@@ -352,7 +352,6 @@ object SipManager {
         registerNetworkWatcher()
     }
 
-    // Wi-Fi থেকে Teletalk SIM MB বা যেকোনো নেটওয়ার্কে গেলে অটোমেটিক রিকানেক্ট করবে
     private fun registerNetworkWatcher() {
         if (networkCallbackRegistered) return
         val ctx = appContext ?: return
@@ -459,13 +458,12 @@ object SipManager {
     fun applyNetworkPolicies(targetCore: Core? = core) {
         val c = targetCore ?: return
 
-        // Teletalk SIM IPv6 + IPv4 Dual-Stack Support
         c.isIpv6Enabled = _allowIpv6.value
         c.config.setBool("net", "allow_ipv6", _allowIpv6.value)
 
-        // Random Local Port (Bypasses Teletalk & Mobile CGNAT Port Blocks)
         val transports = c.transports
         if (_useRandomPort.value) {
+            // -1 দিলে অপারেটিং সিস্টেম যেকোনো ফ্রী বা ডাইনামিক UDP পোর্ট (Ephemeral Ports) স্বয়ংক্রিয়ভাবে অ্যালোকেট করে নেয়
             transports.udpPort = -1
             transports.tcpPort = -1
             transports.tlsPort = -1
@@ -476,16 +474,13 @@ object SipManager {
         }
         c.transports = transports
 
-        // Symmetric RTP & Force Rport
         c.config.setBool("rtp", "symmetric", _enableRportSymmetric.value)
         c.config.setBool("sip", "rport", _enableRportSymmetric.value)
         c.config.setBool("sip", "use_rport", _enableRportSymmetric.value)
 
-        // Fast NAT Keep-Alive for Mobile Data
         c.isKeepAliveEnabled = true
         c.config.setInt("sip", "keep_alive_period", _keepAliveSec.value * 1000)
 
-        // STUN & ICE NAT Traversal
         val natPolicy = c.createNatPolicy()
         natPolicy.stunServer = _stunServer.value.trim().ifEmpty { "stun.l.google.com:19302" }
         natPolicy.isStunEnabled = _enableStunIce.value

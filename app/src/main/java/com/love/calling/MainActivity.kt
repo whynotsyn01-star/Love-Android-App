@@ -11,7 +11,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -29,28 +31,43 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.love.calling.sip.CallHistoryItem
+import com.love.calling.sip.SipAccountItem
 import com.love.calling.sip.SipForegroundService
 import com.love.calling.sip.SipManager
 
 data class PhoneContact(val name: String, val number: String)
+
+// প্রিমিয়াম ব্যাকগ্রাউন্ড ও গ্লাস কার্ড কালার
+val PremiumBgBrush = Brush.verticalGradient(
+    colors = listOf(
+        Color(0xFF1A0B1E), // ডিপ রোজ-পার্পল টপ
+        Color(0xFF0E111A), // মিডনাইট ব্লু মিডল
+        Color(0xFF090A0F)  // ডিপ ডার্ক বটম
+    )
+)
+val GlassCardColor = Color(0xFF1C1F2E).copy(alpha = 0.78f)
+val GlassBorderColor = Color(0xFFFF2E63).copy(alpha = 0.25f)
+val AccentPink = Color(0xFFFF2E63)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         SipManager.init(this)
 
-        // ব্যাকগ্রাউন্ড সার্ভিস চালু রাখা যাতে রিসেন্ট অ্যাপ থেকে কেটে দিলেও কানেকশন না কাটে
         val serviceIntent = Intent(this, SipForegroundService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(serviceIntent)
@@ -58,20 +75,10 @@ class MainActivity : ComponentActivity() {
             startService(serviceIntent)
         }
 
-        // অ্যাপে ঢুকলে আগে থেকে Online থাকলে নতুন করে রিকানেক্ট না করে সরাসরি Online দেখাবে,
-        // আর ডিসকানেক্ট থাকলে সাথে সাথে অটো-কানেক্ট করে নেবে
-        val prefs = getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
-        val savedServer = prefs.getString("server", "") ?: ""
-        val savedUser = prefs.getString("user", "") ?: ""
-        val savedPass = prefs.getString("pass", "") ?: ""
-        val savedPort = prefs.getInt("port", 5060)
-        val savedTls = prefs.getBoolean("tls", false)
-        if (savedServer.isNotEmpty() && savedUser.isNotEmpty() && SipManager.regState.value != "Online") {
-            SipManager.register(savedServer, savedUser, savedPass, savedPort, savedTls)
-        }
+        autoConnectIfNeeded()
 
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
+            MaterialTheme(colorScheme = darkColorScheme(primary = AccentPink)) {
                 LoveCallingApp()
             }
         }
@@ -79,7 +86,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // অ্যাপ মিনিমাইজ বা স্ক্রিন অফ থেকে আবার ওপেন করলে কানেকশন চেক করা
+        autoConnectIfNeeded()
+    }
+
+    private fun autoConnectIfNeeded() {
         val prefs = getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
         val savedServer = prefs.getString("server", "") ?: ""
         val savedUser = prefs.getString("user", "") ?: ""
@@ -98,10 +108,11 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun LoveCallingApp() {
     val context = LocalContext.current
-    var selectedTab by remember { mutableIntStateOf(0) } // 0=Keypad, 1=Recents, 2=Contacts, 3=Settings
+    var selectedTab by remember { mutableIntStateOf(0) } // 0=Keypad, 1=Recents, 2=Contacts, 3=Accounts
     val regState by SipManager.regState.collectAsState()
     val callState by SipManager.callState.collectAsState()
     val remoteNumber by SipManager.remoteNumber.collectAsState()
+    val isAddingCall by SipManager.isAddingCall.collectAsState()
 
     val permissions = buildList {
         add(Manifest.permission.RECORD_AUDIO)
@@ -127,42 +138,71 @@ fun LoveCallingApp() {
         launcher.launch(permissions)
     }
 
-    if (callState != "Idle") {
+    // যদি কল চালু থাকে এবং Add Call মোডে না থাকে, তবে ইন-কল স্ক্রিন দেখাবে
+    if (callState != "Idle" && !isAddingCall) {
         ActiveCallScreen(callState = callState, remoteNumber = remoteNumber)
         return
     }
 
     Scaffold(
+        containerColor = Color.Transparent,
         topBar = {
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF121418))
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                    .background(Color(0xFF140B18).copy(alpha = 0.95f))
             ) {
-                Text("Love SIP", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                val badgeColor = when {
-                    regState == "Online" -> Color(0xFF2ECC71)
-                    regState.startsWith("Connecting") -> Color(0xFFF39C12)
-                    else -> Color(0xFFE74C3C)
-                }
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(badgeColor.copy(alpha = 0.2f))
-                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Box(Modifier.size(8.dp).clip(CircleShape).background(badgeColor))
-                    Spacer(Modifier.width(6.dp))
-                    Text(regState, color = badgeColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Favorite, contentDescription = null, tint = AccentPink, modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Love SIP", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+
+                    val badgeColor = when {
+                        regState == "Online" -> Color(0xFF2ECC71)
+                        regState.startsWith("Connecting") -> Color(0xFFF39C12)
+                        else -> Color(0xFFE74C3C)
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(badgeColor.copy(alpha = 0.18f))
+                            .border(1.dp, badgeColor.copy(alpha = 0.4f), RoundedCornerShape(20.dp))
+                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                    ) {
+                        Box(Modifier.size(8.dp).clip(CircleShape).background(badgeColor))
+                        Spacer(Modifier.width(6.dp))
+                        Text(regState, color = badgeColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
+                // Add Call মোডে থাকলে উপরে সবুজ ব্যানার দেখাবে যাতে সহজে কলে ফেরা যায়
+                if (isAddingCall) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF2ECC71))
+                            .clickable { SipManager.cancelAddCall() }
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("1st Call on Hold • Dial 2nd Person", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text("Back to Call", color = Color.Black, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                    }
                 }
             }
         },
         bottomBar = {
-            NavigationBar(containerColor = Color(0xFF121418)) {
+            NavigationBar(containerColor = Color(0xFF110D18)) {
                 NavigationBarItem(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
@@ -184,8 +224,8 @@ fun LoveCallingApp() {
                 NavigationBarItem(
                     selected = selectedTab == 3,
                     onClick = { selectedTab = 3 },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
-                    label = { Text("Settings") }
+                    icon = { Icon(Icons.Default.ManageAccounts, contentDescription = "Accounts") },
+                    label = { Text("Accounts") }
                 )
             }
         }
@@ -193,14 +233,14 @@ fun LoveCallingApp() {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF0B0D10))
+                .background(PremiumBgBrush)
                 .padding(innerPadding)
         ) {
             when (selectedTab) {
                 0 -> IphoneDialpadScreen()
                 1 -> RecentsScreen()
                 2 -> ContactsScreen(hasPermission = hasContactsPerm, onRequestPerm = { launcher.launch(permissions) })
-                3 -> SettingsScreen()
+                3 -> MultiAccountSettingsScreen()
             }
         }
     }
@@ -221,31 +261,27 @@ fun IphoneDialpadScreen() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = 8.dp),
+            .padding(horizontal = 20.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // নম্বর ডিসপ্লে এবং কপি-পেস্ট বার
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
-            ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = {
                     val clip = clipboard.getText()?.text ?: ""
                     if (clip.isNotEmpty()) {
                         dialedNumber += clip.filter { it.isDigit() || it == '+' || it == '*' || it == '#' }
                     }
                 }) {
-                    Icon(Icons.Default.ContentPaste, contentDescription = "Paste", modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.ContentPaste, contentDescription = "Paste", modifier = Modifier.size(16.dp), tint = AccentPink)
                     Spacer(Modifier.width(4.dp))
-                    Text("Paste", fontSize = 13.sp)
+                    Text("Paste", fontSize = 13.sp, color = Color.White)
                 }
                 if (dialedNumber.isNotEmpty()) {
                     TextButton(onClick = { clipboard.setText(AnnotatedString(dialedNumber)) }) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp))
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp), tint = AccentPink)
                         Spacer(Modifier.width(4.dp))
-                        Text("Copy", fontSize = 13.sp)
+                        Text("Copy", fontSize = 13.sp, color = Color.White)
                     }
                 }
             }
@@ -271,27 +307,21 @@ fun IphoneDialpadScreen() {
             )
         }
 
-        // বড় আইফোন স্টাইল গোল ডায়ালপ্যাড বাটন
-        Column(
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             keys.forEach { row ->
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(22.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(22.dp), verticalAlignment = Alignment.CenterVertically) {
                     row.forEach { (digit, letters) ->
                         Box(
                             modifier = Modifier
-                                .size(82.dp)
+                                .size(80.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFF22262E))
+                                .background(GlassCardColor)
+                                .border(1.dp, GlassBorderColor, CircleShape)
                                 .clickable { dialedNumber += digit },
                             contentAlignment = Alignment.Center
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(digit, fontSize = 32.sp, fontWeight = FontWeight.Medium, color = Color.White)
+                                Text(digit, fontSize = 31.sp, fontWeight = FontWeight.Medium, color = Color.White)
                                 if (letters.isNotEmpty()) {
                                     Text(letters, fontSize = 10.sp, color = Color.LightGray, letterSpacing = 1.sp)
                                 }
@@ -302,11 +332,10 @@ fun IphoneDialpadScreen() {
             }
         }
 
-        // নিচের গ্রুপ কল, সবুজ কল বাটন এবং ব্যাকস্পেস
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 12.dp),
+                .padding(bottom = 10.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -315,16 +344,17 @@ fun IphoneDialpadScreen() {
                 modifier = Modifier
                     .size(56.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF2C3E50))
+                    .background(GlassCardColor)
+                    .border(1.dp, GlassBorderColor, CircleShape)
             ) {
                 Icon(Icons.Default.Groups, contentDescription = "Group Call", tint = Color.White)
             }
 
             Box(
                 modifier = Modifier
-                    .size(78.dp)
+                    .size(76.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF2ECC71))
+                    .background(Brush.linearGradient(listOf(Color(0xFF2ECC71), Color(0xFF27AE60))))
                     .clickable {
                         if (dialedNumber.isNotEmpty()) {
                             SipManager.makeCall(dialedNumber)
@@ -365,9 +395,11 @@ fun RecentsScreen() {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 4.dp)
+                    .padding(vertical = 5.dp)
                     .clickable { SipManager.makeCall(item.number) },
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF181B20))
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, GlassBorderColor),
+                colors = CardDefaults.cardColors(containerColor = GlassCardColor)
             ) {
                 Row(
                     modifier = Modifier.padding(14.dp).fillMaxWidth(),
@@ -376,7 +408,7 @@ fun RecentsScreen() {
                 ) {
                     Column {
                         Text(item.number, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                        Text("${item.type} • ${item.time}", fontSize = 13.sp, color = Color.Gray)
+                        Text("${item.type} • ${item.time}", fontSize = 13.sp, color = Color.LightGray)
                     }
                     IconButton(onClick = { SipManager.makeCall(item.number) }) {
                         Icon(Icons.Default.Call, contentDescription = "Call", tint = Color(0xFF2ECC71))
@@ -437,6 +469,7 @@ fun ContactsScreen(hasPermission: Boolean, onRequestPerm: () -> Unit) {
             onValueChange = { searchQuery = it },
             modifier = Modifier.fillMaxWidth(),
             placeholder = { Text("Search contacts...") },
+            shape = RoundedCornerShape(14.dp),
             singleLine = true
         )
         Spacer(Modifier.height(8.dp))
@@ -452,7 +485,9 @@ fun ContactsScreen(hasPermission: Boolean, onRequestPerm: () -> Unit) {
                         .fillMaxWidth()
                         .padding(vertical = 4.dp)
                         .clickable { SipManager.makeCall(contact.number) },
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF181B20))
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, GlassBorderColor),
+                    colors = CardDefaults.cardColors(containerColor = GlassCardColor)
                 ) {
                     Row(
                         modifier = Modifier.padding(14.dp).fillMaxWidth(),
@@ -477,20 +512,31 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
     val isSpeaker by SipManager.isSpeaker.collectAsState()
     val isOnHold by SipManager.isOnHold.collectAsState()
     val isRecording by SipManager.isRecording.collectAsState()
+    val activeCallsCount by SipManager.activeCallsCount.collectAsState()
+    val isInConference by SipManager.isInConference.collectAsState()
     var showDtmf by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0B0D10))
+            .background(PremiumBgBrush)
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 32.dp)) {
-            Text(remoteNumber, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Text(
+                if (isInConference) "3-Way Conference" else remoteNumber,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
             Spacer(Modifier.height(8.dp))
-            Text(callState, fontSize = 16.sp, color = Color(0xFF2ECC71))
+            Text(
+                if (isInConference) "You + 2 Participants Connected" else callState,
+                fontSize = 16.sp,
+                color = Color(0xFF2ECC71)
+            )
         }
 
         if (showDtmf) {
@@ -518,7 +564,12 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
                 Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
                     CallActionBtn("Hold", Icons.Default.Pause, isOnHold) { SipManager.toggleHold() }
                     CallActionBtn("Record", Icons.Default.FiberManualRecord, isRecording) { SipManager.toggleRecord() }
-                    CallActionBtn("3-Way", Icons.Default.Groups, false) { SipManager.startConference() }
+                    // ১টি কল থাকলে Add Call দেখাবে, আর ২য় জনকে কল দিলে Merge বাটন দেখাবে!
+                    if (activeCallsCount >= 2 && !isInConference) {
+                        CallActionBtn("Merge", Icons.Default.CallMerge, true) { SipManager.mergeCallsToConference() }
+                    } else {
+                        CallActionBtn("Add Call", Icons.Default.PersonAdd, false) { SipManager.prepareAddCall() }
+                    }
                 }
             }
         }
@@ -558,7 +609,8 @@ fun CallActionBtn(label: String, icon: androidx.compose.ui.graphics.vector.Image
             modifier = Modifier
                 .size(66.dp)
                 .clip(CircleShape)
-                .background(if (active) Color(0xFF2ECC71) else Color(0xFF22262E))
+                .background(if (active) AccentPink else GlassCardColor)
+                .border(1.dp, GlassBorderColor, CircleShape)
                 .clickable { onClick() },
             contentAlignment = Alignment.Center
         ) {
@@ -570,30 +622,106 @@ fun CallActionBtn(label: String, icon: androidx.compose.ui.graphics.vector.Image
 }
 
 @Composable
-fun SettingsScreen() {
-    val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE) }
+fun MultiAccountSettingsScreen() {
+    val accounts by SipManager.accounts.collectAsState()
+    val activeId by SipManager.activeAccountId.collectAsState()
 
-    var server by remember { mutableStateOf(prefs.getString("server", "") ?: "") }
-    var username by remember { mutableStateOf(prefs.getString("user", "") ?: "") }
-    var password by remember { mutableStateOf(prefs.getString("pass", "") ?: "") }
-    var port by remember { mutableStateOf((prefs.getInt("port", 5060)).toString()) }
-    var useTls by remember { mutableStateOf(prefs.getBoolean("tls", false)) }
+    var editingId by remember { mutableStateOf<String?>(null) }
+    var label by remember { mutableStateOf("") }
+    var server by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+    var port by remember { mutableStateOf("5060") }
+    var useTls by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(18.dp),
+            .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("SIP Account Setup (UDP / TLS)", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        Text("Saved SIP Accounts (${accounts.size})", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
 
+        // সেভ করা একাধিক SIP অ্যাকাউন্টের লিস্ট
+        accounts.forEach { acc: SipAccountItem ->
+            val isActive = acc.id == activeId
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { SipManager.activateAccount(acc) },
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.5.dp, if (isActive) Color(0xFF2ECC71) else GlassBorderColor),
+                colors = CardDefaults.cardColors(containerColor = GlassCardColor)
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(acc.label, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                            if (isActive) {
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "ACTIVE",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF2ECC71),
+                                    modifier = Modifier
+                                        .background(Color(0xFF2ECC71).copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Text("${acc.username}@${acc.server}:${acc.port} (${if (acc.useTls) "TLS" else "UDP"})", fontSize = 13.sp, color = Color.LightGray)
+                    }
+
+                    Row {
+                        IconButton(onClick = {
+                            editingId = acc.id
+                            label = acc.label
+                            server = acc.server
+                            username = acc.username
+                            password = acc.password
+                            port = acc.port.toString()
+                            useTls = acc.useTls
+                        }) {
+                            Icon(Icons.Default.Edit, contentDescription = "Edit", tint = Color.LightGray)
+                        }
+                        IconButton(onClick = { SipManager.deleteAccount(acc.id) }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFE74C3C))
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalDivider(color = GlassBorderColor, modifier = Modifier.padding(vertical = 4.dp))
+
+        Text(
+            if (editingId == null) "Add New SIP Account" else "Edit SIP Account",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
+
+        OutlinedTextField(
+            value = label,
+            onValueChange = { label = it },
+            label = { Text("Account Name (e.g. Office / Personal)") },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            singleLine = true
+        )
         OutlinedTextField(
             value = server,
             onValueChange = { server = it },
             label = { Text("Server IP or Domain") },
             modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
             singleLine = true
         )
         OutlinedTextField(
@@ -601,13 +729,26 @@ fun SettingsScreen() {
             onValueChange = { username = it },
             label = { Text("SIP Username / Extension") },
             modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
             singleLine = true
         )
+        // Password Show / Hide (চোখ আইকন) সহ বক্স
         OutlinedTextField(
             value = password,
             onValueChange = { password = it },
             label = { Text("SIP Password") },
+            visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon = {
+                IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                    Icon(
+                        imageVector = if (passwordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                        contentDescription = if (passwordVisible) "Hide Password" else "Show Password",
+                        tint = Color.LightGray
+                    )
+                }
+            },
             modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
             singleLine = true
         )
         OutlinedTextField(
@@ -616,6 +757,7 @@ fun SettingsScreen() {
             label = { Text("Port (5060 for UDP, 5061 for TLS)") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
             singleLine = true
         )
 
@@ -630,18 +772,25 @@ fun SettingsScreen() {
         Button(
             onClick = {
                 val p = port.toIntOrNull() ?: 5060
-                prefs.edit()
-                    .putString("server", server.trim())
-                    .putString("user", username.trim())
-                    .putString("pass", password)
-                    .putInt("port", p)
-                    .putBoolean("tls", useTls)
-                    .apply()
-                SipManager.register(server, username, password, p, useTls)
+                SipManager.saveAndActivateAccount(editingId, label, server, username, password, p, useTls)
+                editingId = null
+                label = ""
+                server = ""
+                username = ""
+                password = ""
+                port = "5060"
+                useTls = false
             },
+            colors = ButtonDefaults.buttonColors(containerColor = AccentPink),
+            shape = RoundedCornerShape(14.dp),
             modifier = Modifier.fillMaxWidth().height(52.dp)
         ) {
-            Text("Save & Connect", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(
+                if (editingId == null) "Save & Connect Account" else "Update & Connect",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
         }
 
         Spacer(Modifier.height(40.dp))

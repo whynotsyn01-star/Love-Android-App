@@ -1,6 +1,8 @@
 package com.love.calling.sip
 
 import android.content.Context
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -59,7 +61,6 @@ object SipManager {
     private var networkCallbackRegistered = false
     private var portRetryCount = 0
 
-    // Long Call Stability Locks + Ear Proximity Sensor Lock (Screen Off near ear, Screen On away)
     private var callWakeLock: PowerManager.WakeLock? = null
     private var proximityWakeLock: PowerManager.WakeLock? = null
     private var wifiHighPerfLock: WifiManager.WifiLock? = null
@@ -97,6 +98,13 @@ object SipManager {
 
     private val _isSpeaker = MutableStateFlow(false)
     val isSpeaker: StateFlow<Boolean> = _isSpeaker.asStateFlow()
+
+    // Bluetooth Earbuds State
+    private val _isBluetoothAvailable = MutableStateFlow(false)
+    val isBluetoothAvailable: StateFlow<Boolean> = _isBluetoothAvailable.asStateFlow()
+
+    private val _isBluetoothActive = MutableStateFlow(false)
+    val isBluetoothActive: StateFlow<Boolean> = _isBluetoothActive.asStateFlow()
 
     private val _isOnHold = MutableStateFlow(false)
     val isOnHold: StateFlow<Boolean> = _isOnHold.asStateFlow()
@@ -184,7 +192,6 @@ object SipManager {
         } catch (_: Exception) {}
     }
 
-    // কানে ধরলে স্ক্রিন অফ এবং কান থেকে সরালে স্ক্রিন অন করার সেন্সর কন্ট্রোল
     private fun updateProximitySensorLock() {
         try {
             val ctx = appContext ?: return
@@ -197,7 +204,8 @@ object SipManager {
                 ).apply { setReferenceCounted(false) }
             }
 
-            val inActiveVoiceCall = (core?.callsNb ?: 0) > 0 && !_isVideoCall.value && !_isSpeaker.value
+            // ইয়ারবাডস বা স্পিকার চালু না থাকলে কানে ধরলে স্ক্রিন অফ হবে
+            val inActiveVoiceCall = (core?.callsNb ?: 0) > 0 && !_isVideoCall.value && !_isSpeaker.value && !_isBluetoothActive.value
             if (inActiveVoiceCall) {
                 if (proximityWakeLock?.isHeld == false) {
                     proximityWakeLock?.acquire(3 * 60 * 60 * 1000L)
@@ -215,7 +223,158 @@ object SipManager {
             if (proximityWakeLock?.isHeld == true) proximityWakeLock?.release()
             if (callWakeLock?.isHeld == true) callWakeLock?.release()
             if (wifiHighPerfLock?.isHeld == true) wifiHighPerfLock?.release()
+            stopSystemBluetoothSco()
         } catch (_: Exception) {}
+    }
+
+    // === BLUETOOTH EARBUDS & HEADSET AUDIO ENGINE (100% Private Earbuds Audio & Mic) ===
+    private fun findBluetoothOutputDevice(c: Core): AudioDevice? {
+        return c.audioDevices.firstOrNull {
+            (it.type == AudioDevice.Type.Bluetooth || it.type == AudioDevice.Type.BluetoothA2dp || it.type == AudioDevice.Type.HearingAid) &&
+                    (it.capabilities == AudioDevice.Capabilities.CapabilityPlay || it.capabilities == AudioDevice.Capabilities.CapabilityAll)
+        } ?: c.audioDevices.firstOrNull {
+            it.type == AudioDevice.Type.Bluetooth || it.type == AudioDevice.Type.BluetoothA2dp
+        }
+    }
+
+    private fun findBluetoothInputDevice(c: Core): AudioDevice? {
+        return c.audioDevices.firstOrNull {
+            (it.type == AudioDevice.Type.Bluetooth || it.type == AudioDevice.Type.HearingAid) &&
+                    (it.capabilities == AudioDevice.Capabilities.CapabilityRecord || it.capabilities == AudioDevice.Capabilities.CapabilityAll)
+        } ?: c.audioDevices.firstOrNull {
+            it.type == AudioDevice.Type.Bluetooth
+        }
+    }
+
+    private fun findWiredHeadsetDevice(c: Core): AudioDevice? {
+        return c.audioDevices.firstOrNull {
+            it.type == AudioDevice.Type.Headset || it.type == AudioDevice.Type.Headphones
+        }
+    }
+
+    private fun startSystemBluetoothSco() {
+        try {
+            val am = appContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            am.isSpeakerphoneOn = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val btScoDev = am.availableCommunicationDevices.firstOrNull {
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+                }
+                if (btScoDev != null) {
+                    am.setCommunicationDevice(btScoDev)
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                if (!am.isBluetoothScoOn) {
+                    am.startBluetoothSco()
+                    am.isBluetoothScoOn = true
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun stopSystemBluetoothSco() {
+        try {
+            val am = appContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                am.clearCommunicationDevice()
+            } else {
+                @Suppress("DEPRECATION")
+                if (am.isBluetoothScoOn) {
+                    am.isBluetoothScoOn = false
+                    am.stopBluetoothSco()
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    // ব্লুটুথ ইয়ারবাডস বা হেডফোন কানেক্ট থাকলে অটোমেটিক সব সাউন্ড ও মাইক ইয়ারবাডসে পাঠাবে (বাইরে কোনো শব্দ যাবে না)
+    fun autoRouteBestAudioDevice() {
+        val c = core ?: return
+        c.reloadSoundDevices()
+
+        val btOut = findBluetoothOutputDevice(c)
+        val btIn = findBluetoothInputDevice(c)
+        val wiredDev = findWiredHeadsetDevice(c)
+
+        _isBluetoothAvailable.value = (btOut != null)
+
+        when {
+            btOut != null -> {
+                startSystemBluetoothSco()
+                c.outputAudioDevice = btOut
+                c.defaultOutputAudioDevice = btOut
+                if (btIn != null) {
+                    c.inputAudioDevice = btIn
+                    c.defaultInputAudioDevice = btIn
+                }
+                _isBluetoothActive.value = true
+                _isSpeaker.value = false
+            }
+            wiredDev != null -> {
+                stopSystemBluetoothSco()
+                c.outputAudioDevice = wiredDev
+                c.defaultOutputAudioDevice = wiredDev
+                val wiredMic = c.audioDevices.firstOrNull {
+                    it.type == AudioDevice.Type.Headset &&
+                            (it.capabilities == AudioDevice.Capabilities.CapabilityRecord || it.capabilities == AudioDevice.Capabilities.CapabilityAll)
+                }
+                if (wiredMic != null) {
+                    c.inputAudioDevice = wiredMic
+                }
+                _isBluetoothActive.value = false
+                _isSpeaker.value = false
+            }
+            _isSpeaker.value || _isVideoCall.value -> {
+                stopSystemBluetoothSco()
+                val spk = c.audioDevices.firstOrNull { it.type == AudioDevice.Type.Speaker }
+                if (spk != null) {
+                    c.outputAudioDevice = spk
+                }
+                _isBluetoothActive.value = false
+                _isSpeaker.value = true
+            }
+            else -> {
+                stopSystemBluetoothSco()
+                val ear = c.audioDevices.firstOrNull { it.type == AudioDevice.Type.Earpiece }
+                if (ear != null) {
+                    c.outputAudioDevice = ear
+                }
+                _isBluetoothActive.value = false
+                _isSpeaker.value = false
+            }
+        }
+        updateProximitySensorLock()
+    }
+
+    fun toggleBluetoothAudio() {
+        val c = core ?: return
+        c.reloadSoundDevices()
+        val btOut = findBluetoothOutputDevice(c)
+        val btIn = findBluetoothInputDevice(c)
+
+        if (btOut == null) {
+            _isBluetoothAvailable.value = false
+            _isBluetoothActive.value = false
+            return
+        }
+
+        if (!_isBluetoothActive.value) {
+            startSystemBluetoothSco()
+            c.outputAudioDevice = btOut
+            if (btIn != null) c.inputAudioDevice = btIn
+            _isBluetoothActive.value = true
+            _isSpeaker.value = false
+        } else {
+            stopSystemBluetoothSco()
+            val ear = c.audioDevices.firstOrNull { it.type == AudioDevice.Type.Earpiece }
+            if (ear != null) c.outputAudioDevice = ear
+            val phoneMic = c.audioDevices.firstOrNull { it.type == AudioDevice.Type.Microphone }
+            if (phoneMic != null) c.inputAudioDevice = phoneMic
+            _isBluetoothActive.value = false
+        }
+        updateProximitySensorLock()
     }
 
     fun formatDuration(totalSec: Long): String {
@@ -261,6 +420,17 @@ object SipManager {
     }
 
     private val coreListener = object : CoreListenerStub() {
+        // ইয়ারবাডস কানেক্ট বা ডিসকানেক্ট হওয়া মাত্রই অটো-ডিটেক্ট করবে
+        override fun onAudioDevicesListUpdated(core: Core) {
+            val btOut = findBluetoothOutputDevice(core)
+            _isBluetoothAvailable.value = (btOut != null)
+            if (core.callsNb > 0) {
+                autoRouteBestAudioDevice()
+            } else if (btOut == null) {
+                _isBluetoothActive.value = false
+            }
+        }
+
         override fun onAccountRegistrationStateChanged(
             core: Core,
             account: Account,
@@ -322,9 +492,9 @@ object SipManager {
             }
 
             when (state) {
-                // ১. প্রথমে কল দেওয়ার সাথে সাথে "Calling..." উঠবে
                 Call.State.OutgoingInit, Call.State.OutgoingProgress -> {
                     acquireLongCallLocks()
+                    autoRouteBestAudioDevice()
                     if (core.callsNb <= 1) {
                         wasAnswered = false
                         timerJob?.cancel()
@@ -337,9 +507,9 @@ object SipManager {
                     _callState.value = "Calling..."
                     _isAddingCall.value = false
                 }
-                // ২. অপর পাশে কল ঢুকলে (রিং হলে) সাথে সাথে "Ringing..." উঠবে
                 Call.State.OutgoingRinging, Call.State.OutgoingEarlyMedia -> {
                     acquireLongCallLocks()
+                    autoRouteBestAudioDevice()
                     if (core.callsNb <= 1 && !wasAnswered) {
                         _callDurationSec.value = 0L
                     }
@@ -353,6 +523,7 @@ object SipManager {
                         return
                     }
                     acquireLongCallLocks()
+                    autoRouteBestAudioDevice()
                     if (core.callsNb <= 1) {
                         wasAnswered = false
                         timerJob?.cancel()
@@ -368,16 +539,13 @@ object SipManager {
                         answerCall(withVideo = hasVideo)
                     }
                 }
-                // ৩. অপর পাশ থেকে কল ধরার সাথে সাথেই Live Timer (00:01, 00:02...) শুরু হবে
                 Call.State.Connected, Call.State.StreamsRunning -> {
                     wasAnswered = true
                     _callState.value = "Active"
                     _isOnHold.value = false
                     _isAddingCall.value = false
-                    if (hasVideo && !_isSpeaker.value) {
-                        toggleSpeaker()
-                    }
                     acquireLongCallLocks()
+                    autoRouteBestAudioDevice()
                     startLiveTimerIfNotRunning()
                 }
                 Call.State.Paused, Call.State.PausedByRemote -> {
@@ -411,6 +579,8 @@ object SipManager {
                         _callState.value = "Idle"
                         _isVideoCall.value = false
                         _isMuted.value = false
+                        _isSpeaker.value = false
+                        _isBluetoothActive.value = false
                         _isOnHold.value = false
                         _isRecording.value = false
                         _isInConference.value = false
@@ -418,7 +588,7 @@ object SipManager {
                     } else {
                         _callState.value = "Active"
                         core.currentCall?.resume()
-                        updateProximitySensorLock()
+                        autoRouteBestAudioDevice()
                     }
                 }
                 else -> {}
@@ -440,7 +610,6 @@ object SipManager {
 
         applyNetworkPolicies(c)
 
-        // === ULTRA HD AUDIO + 1 HOUR+ MARATHON CALL STABILITY TUNING ===
         c.isEchoCancellationEnabled = true
         c.micGainDb = 2.0f
         c.playbackGainDb = 2.5f
@@ -491,6 +660,8 @@ object SipManager {
         c.addListener(coreListener)
         c.start()
         core = c
+
+        _isBluetoothAvailable.value = (findBluetoothOutputDevice(c) != null)
 
         registerNetworkWatcher()
     }
@@ -618,7 +789,7 @@ object SipManager {
         params.isVideoEnabled = nextState
         call.update(params)
         _isVideoCall.value = nextState
-        updateProximitySensorLock()
+        autoRouteBestAudioDevice()
     }
 
     fun applyNetworkPolicies(targetCore: Core? = core) {
@@ -831,6 +1002,7 @@ object SipManager {
 
         _isVideoCall.value = isVideo
         acquireLongCallLocks()
+        autoRouteBestAudioDevice()
         c.isNetworkReachable = true
 
         if (c.callsNb > 0) {
@@ -949,6 +1121,7 @@ object SipManager {
         val call = c.currentCall ?: return
         _isVideoCall.value = withVideo
         acquireLongCallLocks()
+        autoRouteBestAudioDevice()
         val params = c.createCallParams(call)
         if (params != null) {
             params.isAudioEnabled = true
@@ -993,13 +1166,20 @@ object SipManager {
 
     fun toggleSpeaker() {
         val c = core ?: return
+        c.reloadSoundDevices()
         val next = !_isSpeaker.value
-        val targetType = if (next) AudioDevice.Type.Speaker else AudioDevice.Type.Earpiece
-        val device = c.audioDevices.firstOrNull { it.type == targetType }
-        if (device != null) {
-            c.outputAudioDevice = device
+        if (next) {
+            // ইউজার ইচ্ছে করে লাউডস্পিকার অন করলে স্পিকারে যাবে
+            stopSystemBluetoothSco()
+            val spk = c.audioDevices.firstOrNull { it.type == AudioDevice.Type.Speaker }
+            if (spk != null) c.outputAudioDevice = spk
+            _isSpeaker.value = true
+            _isBluetoothActive.value = false
+        } else {
+            // লাউডস্পিকার অফ করলে যদি ইয়ারবাডস কানেক্ট থাকে তবে সরাসরি ইয়ারবাডসে চলে যাবে, নাহলে কানের স্পিকারে (Earpiece) যাবে
+            _isSpeaker.value = false
+            autoRouteBestAudioDevice()
         }
-        _isSpeaker.value = next
         updateProximitySensorLock()
     }
 

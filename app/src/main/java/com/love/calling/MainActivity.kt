@@ -888,7 +888,7 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
     }
 }
 
-// Standard Medium-Large Button (76.dp circle + 32.dp icon + 13.sp label)
+// Fixed Line 899: Both branches are Color so Modifier.background compiles cleanly
 @Composable
 fun CallActionBtn(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, active: Boolean, onClick: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -896,7 +896,7 @@ fun CallActionBtn(label: String, icon: androidx.compose.ui.graphics.vector.Image
             modifier = Modifier
                 .size(76.dp)
                 .clip(CircleShape)
-                .background(if (active) AccentRose else DialButtonBrush)
+                .background(if (active) AccentRose else GlassCardColor)
                 .border(1.3.dp, if (active) AccentRose else GlassBorderColor, CircleShape)
                 .clickable { onClick() },
             contentAlignment = Alignment.Center

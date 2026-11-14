@@ -204,7 +204,6 @@ object SipManager {
                 ).apply { setReferenceCounted(false) }
             }
 
-            // ইয়ারবাডস বা স্পিকার চালু না থাকলে কানে ধরলে স্ক্রিন অফ হবে
             val inActiveVoiceCall = (core?.callsNb ?: 0) > 0 && !_isVideoCall.value && !_isSpeaker.value && !_isBluetoothActive.value
             if (inActiveVoiceCall) {
                 if (proximityWakeLock?.isHeld == false) {
@@ -227,13 +226,13 @@ object SipManager {
         } catch (_: Exception) {}
     }
 
-    // === BLUETOOTH EARBUDS & HEADSET AUDIO ENGINE (100% Private Earbuds Audio & Mic) ===
+    // === BLUETOOTH EARBUDS & HEADSET AUDIO ENGINE (100% Compile-Safe) ===
     private fun findBluetoothOutputDevice(c: Core): AudioDevice? {
         return c.audioDevices.firstOrNull {
-            (it.type == AudioDevice.Type.Bluetooth || it.type == AudioDevice.Type.BluetoothA2dp || it.type == AudioDevice.Type.HearingAid) &&
+            (it.type == AudioDevice.Type.Bluetooth || it.type == AudioDevice.Type.HearingAid) &&
                     (it.capabilities == AudioDevice.Capabilities.CapabilityPlay || it.capabilities == AudioDevice.Capabilities.CapabilityAll)
         } ?: c.audioDevices.firstOrNull {
-            it.type == AudioDevice.Type.Bluetooth || it.type == AudioDevice.Type.BluetoothA2dp
+            it.type == AudioDevice.Type.Bluetooth || it.type == AudioDevice.Type.HearingAid
         }
     }
 
@@ -289,7 +288,6 @@ object SipManager {
         } catch (_: Exception) {}
     }
 
-    // ব্লুটুথ ইয়ারবাডস বা হেডফোন কানেক্ট থাকলে অটোমেটিক সব সাউন্ড ও মাইক ইয়ারবাডসে পাঠাবে (বাইরে কোনো শব্দ যাবে না)
     fun autoRouteBestAudioDevice() {
         val c = core ?: return
         c.reloadSoundDevices()
@@ -420,7 +418,6 @@ object SipManager {
     }
 
     private val coreListener = object : CoreListenerStub() {
-        // ইয়ারবাডস কানেক্ট বা ডিসকানেক্ট হওয়া মাত্রই অটো-ডিটেক্ট করবে
         override fun onAudioDevicesListUpdated(core: Core) {
             val btOut = findBluetoothOutputDevice(core)
             _isBluetoothAvailable.value = (btOut != null)
@@ -1169,14 +1166,12 @@ object SipManager {
         c.reloadSoundDevices()
         val next = !_isSpeaker.value
         if (next) {
-            // ইউজার ইচ্ছে করে লাউডস্পিকার অন করলে স্পিকারে যাবে
             stopSystemBluetoothSco()
             val spk = c.audioDevices.firstOrNull { it.type == AudioDevice.Type.Speaker }
             if (spk != null) c.outputAudioDevice = spk
             _isSpeaker.value = true
             _isBluetoothActive.value = false
         } else {
-            // লাউডস্পিকার অফ করলে যদি ইয়ারবাডস কানেক্ট থাকে তবে সরাসরি ইয়ারবাডসে চলে যাবে, নাহলে কানের স্পিকারে (Earpiece) যাবে
             _isSpeaker.value = false
             autoRouteBestAudioDevice()
         }

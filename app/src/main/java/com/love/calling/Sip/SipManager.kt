@@ -7,7 +7,6 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.PowerManager
 import android.telephony.SmsManager
@@ -63,7 +62,6 @@ object SipManager {
 
     private var callWakeLock: PowerManager.WakeLock? = null
     private var proximityWakeLock: PowerManager.WakeLock? = null
-    private var wifiHighPerfLock: WifiManager.WifiLock? = null
 
     private val managerScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var timerJob: Job? = null
@@ -150,103 +148,60 @@ object SipManager {
     private val _stunServer = MutableStateFlow("")
     val stunServer: StateFlow<String> = _stunServer.asStateFlow()
 
-    private val _keepAliveSec = MutableStateFlow(10)
+    private val _keepAliveSec = MutableStateFlow(15)
     val keepAliveSec: StateFlow<Int> = _keepAliveSec.asStateFlow()
 
     private var currentSessionNumber: String = ""
     private var currentSessionDir: String = "Outgoing"
     private var wasAnswered = false
 
-    private fun acquireLongCallLocks() {
-        try {
-            val ctx = appContext ?: return
-            val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
-            if (callWakeLock == null) {
-                callWakeLock = pm?.newWakeLock(
-                    PowerManager.PARTIAL_WAKE_LOCK,
-                    "LoveSIP::LongCallCpuWakeLock"
-                )?.apply { setReferenceCounted(false) }
-            }
-            if (callWakeLock?.isHeld == false) {
-                callWakeLock?.acquire(3 * 60 * 60 * 1000L)
-            }
-
-            if (wifiHighPerfLock == null) {
-                val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                } else {
-                    @Suppress("DEPRECATION")
-                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
-                }
-                wifiHighPerfLock = wm?.createWifiLock(lockMode, "LoveSIP::LowLatencyCallLock")?.apply {
-                    setReferenceCounted(false)
-                }
-            }
-            if (wifiHighPerfLock?.isHeld == false) {
-                wifiHighPerfLock?.acquire()
-            }
-
-            updateProximitySensorLock()
-        } catch (_: Exception) {}
-    }
-
-    private fun updateProximitySensorLock() {
+    private fun acquireCallLocksSafe() {
         try {
             val ctx = appContext ?: return
             val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
-
-            if (proximityWakeLock == null && pm.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
-                proximityWakeLock = pm.newWakeLock(
-                    PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK,
-                    "LoveSIP::ProximityScreenOffLock"
-                ).apply { setReferenceCounted(false) }
-            }
-
-            val inActiveVoiceCall = (core?.callsNb ?: 0) > 0 && !_isVideoCall.value && !_isSpeaker.value && !_isBluetoothActive.value
-            if (inActiveVoiceCall) {
-                if (proximityWakeLock?.isHeld == false) {
-                    proximityWakeLock?.acquire(3 * 60 * 60 * 1000L)
-                }
-            } else {
-                if (proximityWakeLock?.isHeld == true) {
-                    proximityWakeLock?.release()
+            if (callWakeLock == null) {
+                callWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Love:CallLock").apply {
+                    setReferenceCounted(false)
                 }
             }
-        } catch (_: Exception) {}
+            if (callWakeLock?.isHeld == false) {
+                callWakeLock?.acquire(2 * 60 * 60 * 1000L)
+            }
+            updateProximityLockSafe()
+        } catch (_: Throwable) {}
     }
 
-    private fun releaseLongCallLocks() {
+    private fun updateProximityLockSafe() {
+        try {
+            val ctx = appContext ?: return
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+            if (proximityWakeLock == null && pm.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
+                proximityWakeLock = pm.newWakeLock(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK, "Love:ProxLock").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            val shouldHold = (core?.callsNb ?: 0) > 0 && !_isVideoCall.value && !_isSpeaker.value && !_isBluetoothActive.value
+            if (shouldHold) {
+                if (proximityWakeLock?.isHeld == false) proximityWakeLock?.acquire(2 * 60 * 60 * 1000L)
+            } else {
+                if (proximityWakeLock?.isHeld == true) proximityWakeLock?.release()
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun releaseCallLocksSafe() {
         try {
             if (proximityWakeLock?.isHeld == true) proximityWakeLock?.release()
             if (callWakeLock?.isHeld == true) callWakeLock?.release()
-            if (wifiHighPerfLock?.isHeld == true) wifiHighPerfLock?.release()
-            stopSystemBluetoothSco()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
-    private fun findBluetoothOutputDevice(c: Core): AudioDevice? {
+    private fun findBluetoothDevice(c: Core): AudioDevice? {
         return try {
             c.audioDevices.firstOrNull {
-                (it.type == AudioDevice.Type.Bluetooth || it.type == AudioDevice.Type.HearingAid) &&
-                        (it.capabilities == AudioDevice.Capabilities.CapabilityPlay || it.capabilities == AudioDevice.Capabilities.CapabilityAll)
-            } ?: c.audioDevices.firstOrNull {
                 it.type == AudioDevice.Type.Bluetooth || it.type == AudioDevice.Type.HearingAid
             }
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun findBluetoothInputDevice(c: Core): AudioDevice? {
-        return try {
-            c.audioDevices.firstOrNull {
-                (it.type == AudioDevice.Type.Bluetooth || it.type == AudioDevice.Type.HearingAid) &&
-                        (it.capabilities == AudioDevice.Capabilities.CapabilityRecord || it.capabilities == AudioDevice.Capabilities.CapabilityAll)
-            } ?: c.audioDevices.firstOrNull {
-                it.type == AudioDevice.Type.Bluetooth
-            }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             null
         }
     }
@@ -256,137 +211,83 @@ object SipManager {
             c.audioDevices.firstOrNull {
                 it.type == AudioDevice.Type.Headset || it.type == AudioDevice.Type.Headphones
             }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             null
         }
-    }
-
-    private fun startSystemBluetoothSco() {
-        try {
-            val am = appContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-            am.mode = AudioManager.MODE_IN_COMMUNICATION
-            am.isSpeakerphoneOn = false
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val btScoDev = am.availableCommunicationDevices.firstOrNull {
-                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
-                }
-                if (btScoDev != null) {
-                    am.setCommunicationDevice(btScoDev)
-                }
-            } else {
-                @Suppress("DEPRECATION")
-                if (!am.isBluetoothScoOn) {
-                    am.startBluetoothSco()
-                    am.isBluetoothScoOn = true
-                }
-            }
-        } catch (_: Exception) {}
-    }
-
-    private fun stopSystemBluetoothSco() {
-        try {
-            val am = appContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                am.clearCommunicationDevice()
-            } else {
-                @Suppress("DEPRECATION")
-                if (am.isBluetoothScoOn) {
-                    am.isBluetoothScoOn = false
-                    am.stopBluetoothSco()
-                }
-            }
-        } catch (_: Exception) {}
     }
 
     fun autoRouteBestAudioDevice() {
         try {
             val c = core ?: return
-            c.reloadSoundDevices()
-
-            val btOut = findBluetoothOutputDevice(c)
-            val btIn = findBluetoothInputDevice(c)
+            val btDev = findBluetoothDevice(c)
             val wiredDev = findWiredHeadsetDevice(c)
+            _isBluetoothAvailable.value = (btDev != null)
 
-            _isBluetoothAvailable.value = (btOut != null)
-
+            val activeCall = c.currentCall
             when {
-                btOut != null -> {
-                    startSystemBluetoothSco()
-                    c.outputAudioDevice = btOut
-                    c.defaultOutputAudioDevice = btOut
-                    if (btIn != null) {
-                        c.inputAudioDevice = btIn
-                        c.defaultInputAudioDevice = btIn
-                    }
+                btDev != null -> {
+                    c.outputAudioDevice = btDev
+                    c.inputAudioDevice = btDev
+                    activeCall?.outputAudioDevice = btDev
+                    activeCall?.inputAudioDevice = btDev
                     _isBluetoothActive.value = true
                     _isSpeaker.value = false
                 }
                 wiredDev != null -> {
-                    stopSystemBluetoothSco()
                     c.outputAudioDevice = wiredDev
-                    c.defaultOutputAudioDevice = wiredDev
-                    val wiredMic = c.audioDevices.firstOrNull {
-                        it.type == AudioDevice.Type.Headset &&
-                                (it.capabilities == AudioDevice.Capabilities.CapabilityRecord || it.capabilities == AudioDevice.Capabilities.CapabilityAll)
-                    }
-                    if (wiredMic != null) {
-                        c.inputAudioDevice = wiredMic
-                    }
+                    activeCall?.outputAudioDevice = wiredDev
                     _isBluetoothActive.value = false
                     _isSpeaker.value = false
                 }
                 _isSpeaker.value || _isVideoCall.value -> {
-                    stopSystemBluetoothSco()
                     val spk = c.audioDevices.firstOrNull { it.type == AudioDevice.Type.Speaker }
                     if (spk != null) {
                         c.outputAudioDevice = spk
+                        activeCall?.outputAudioDevice = spk
                     }
                     _isBluetoothActive.value = false
                     _isSpeaker.value = true
                 }
                 else -> {
-                    stopSystemBluetoothSco()
                     val ear = c.audioDevices.firstOrNull { it.type == AudioDevice.Type.Earpiece }
                     if (ear != null) {
                         c.outputAudioDevice = ear
+                        activeCall?.outputAudioDevice = ear
                     }
                     _isBluetoothActive.value = false
                     _isSpeaker.value = false
                 }
             }
-            updateProximitySensorLock()
-        } catch (_: Exception) {}
+            updateProximityLockSafe()
+        } catch (_: Throwable) {}
     }
 
     fun toggleBluetoothAudio() {
         try {
             val c = core ?: return
-            c.reloadSoundDevices()
-            val btOut = findBluetoothOutputDevice(c)
-            val btIn = findBluetoothInputDevice(c)
-
-            if (btOut == null) {
+            val btDev = findBluetoothDevice(c)
+            if (btDev == null) {
                 _isBluetoothAvailable.value = false
                 _isBluetoothActive.value = false
                 return
             }
-
             if (!_isBluetoothActive.value) {
-                startSystemBluetoothSco()
-                c.outputAudioDevice = btOut
-                if (btIn != null) c.inputAudioDevice = btIn
+                c.outputAudioDevice = btDev
+                c.inputAudioDevice = btDev
+                c.currentCall?.outputAudioDevice = btDev
+                c.currentCall?.inputAudioDevice = btDev
                 _isBluetoothActive.value = true
                 _isSpeaker.value = false
             } else {
-                stopSystemBluetoothSco()
                 val ear = c.audioDevices.firstOrNull { it.type == AudioDevice.Type.Earpiece }
-                if (ear != null) c.outputAudioDevice = ear
-                val phoneMic = c.audioDevices.firstOrNull { it.type == AudioDevice.Type.Microphone }
-                if (phoneMic != null) c.inputAudioDevice = phoneMic
+                if (ear != null) {
+                    c.outputAudioDevice = ear
+                    c.currentCall?.outputAudioDevice = ear
+                }
                 _isBluetoothActive.value = false
             }
-            updateProximitySensorLock()
-        } catch (_: Exception) {}
+            updateProximityLockSafe()
+        } catch (_: Throwable) {}
     }
 
     fun formatDuration(totalSec: Long): String {
@@ -410,9 +311,6 @@ object SipManager {
             while (isActive) {
                 val elapsed = ((System.currentTimeMillis() - callStartTimeMs) / 1000L).coerceAtLeast(1L)
                 _callDurationSec.value = elapsed
-                if (elapsed % 25L == 0L) {
-                    try { core?.refreshRegisters() } catch (_: Exception) {}
-                }
                 delay(1000L)
             }
         }
@@ -434,14 +332,12 @@ object SipManager {
     private val coreListener = object : CoreListenerStub() {
         override fun onAudioDevicesListUpdated(core: Core) {
             try {
-                val btOut = findBluetoothOutputDevice(core)
-                _isBluetoothAvailable.value = (btOut != null)
+                val btDev = findBluetoothDevice(core)
+                _isBluetoothAvailable.value = (btDev != null)
                 if (core.callsNb > 0) {
                     autoRouteBestAudioDevice()
-                } else if (btOut == null) {
-                    _isBluetoothActive.value = false
                 }
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {}
         }
 
         override fun onAccountRegistrationStateChanged(
@@ -480,7 +376,7 @@ object SipManager {
                 if (text.isNotEmpty()) {
                     saveMessage(sender, text, isOutgoing = false, channel = "SIP")
                 }
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {}
         }
 
         override fun onCallStateChanged(
@@ -494,10 +390,18 @@ object SipManager {
                 val inConf = core.conference != null && (core.conference?.participantCount ?: 0) >= 2
                 _isInConference.value = inConf
 
-                val hasVideo = try { call.currentParams?.isVideoEnabled == true || call.remoteParams?.isVideoEnabled == true } catch (_: Exception) { false }
+                val hasVideo = try {
+                    call.currentParams?.isVideoEnabled == true || call.remoteParams?.isVideoEnabled == true
+                } catch (_: Throwable) {
+                    false
+                }
                 _isVideoCall.value = hasVideo
 
-                val number = try { call.remoteAddress.username ?: call.remoteAddress.asStringUriOnly() } catch (_: Exception) { "Unknown" }
+                val number = try {
+                    call.remoteAddress.username ?: call.remoteAddress.asStringUriOnly()
+                } catch (_: Throwable) {
+                    currentSessionNumber
+                }
                 if (currentSessionNumber.isEmpty()) {
                     currentSessionNumber = number
                 }
@@ -509,8 +413,6 @@ object SipManager {
 
                 when (state) {
                     Call.State.OutgoingInit, Call.State.OutgoingProgress -> {
-                        acquireLongCallLocks()
-                        autoRouteBestAudioDevice()
                         if (core.callsNb <= 1) {
                             wasAnswered = false
                             timerJob?.cancel()
@@ -522,24 +424,22 @@ object SipManager {
                         }
                         _callState.value = "Calling..."
                         _isAddingCall.value = false
+                        acquireCallLocksSafe()
                     }
                     Call.State.OutgoingRinging, Call.State.OutgoingEarlyMedia -> {
-                        acquireLongCallLocks()
-                        autoRouteBestAudioDevice()
                         if (core.callsNb <= 1 && !wasAnswered) {
                             _callDurationSec.value = 0L
                         }
                         _callState.value = "Ringing..."
                         _isAddingCall.value = false
+                        autoRouteBestAudioDevice()
                     }
                     Call.State.IncomingReceived, Call.State.IncomingEarlyMedia -> {
                         if (_dndEnabled.value) {
-                            try { call.decline(Reason.Busy) } catch (_: Exception) {}
+                            try { call.decline(Reason.Busy) } catch (_: Throwable) {}
                             addHistory(number, "Missed (DND)", "00:00")
                             return
                         }
-                        acquireLongCallLocks()
-                        autoRouteBestAudioDevice()
                         if (core.callsNb <= 1) {
                             wasAnswered = false
                             timerJob?.cancel()
@@ -551,16 +451,17 @@ object SipManager {
                         }
                         _callState.value = "Incoming"
                         _isAddingCall.value = false
+                        acquireCallLocksSafe()
                         if (_autoAnswerEnabled.value) {
                             answerCall(withVideo = hasVideo)
                         }
                     }
                     Call.State.Connected, Call.State.StreamsRunning -> {
                         wasAnswered = true
-                        _callState.value = "Active"
+                        _callState.value = "Connected"
                         _isOnHold.value = false
                         _isAddingCall.value = false
-                        acquireLongCallLocks()
+                        acquireCallLocksSafe()
                         autoRouteBestAudioDevice()
                         startLiveTimerIfNotRunning()
                     }
@@ -573,7 +474,7 @@ object SipManager {
                     Call.State.End, Call.State.Released, Call.State.Error -> {
                         _activeCallsCount.value = core.callsNb
                         if (core.callsNb == 0) {
-                            releaseLongCallLocks()
+                            releaseCallLocksSafe()
                             val totalDurationStr = if (wasAnswered) stopLiveTimerAndGetFormatted() else {
                                 timerJob?.cancel()
                                 timerJob = null
@@ -602,14 +503,13 @@ object SipManager {
                             _isInConference.value = false
                             _isAddingCall.value = false
                         } else {
-                            _callState.value = "Active"
-                            try { core.currentCall?.resume() } catch (_: Exception) {}
-                            autoRouteBestAudioDevice()
+                            _callState.value = "Connected"
+                            try { core.currentCall?.resume() } catch (_: Throwable) {}
                         }
                     }
                     else -> {}
                 }
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {}
         }
     }
 
@@ -629,8 +529,8 @@ object SipManager {
             applyNetworkPolicies(c)
 
             c.isEchoCancellationEnabled = true
-            try { c.micGainDb = 2.0f } catch (_: Exception) {}
-            try { c.playbackGainDb = 2.5f } catch (_: Exception) {}
+            try { c.micGainDb = 2.0f } catch (_: Throwable) {}
+            try { c.playbackGainDb = 2.5f } catch (_: Throwable) {}
             c.config.setBool("sound", "ec_state", true)
             c.config.setBool("sound", "noisegate", true)
             c.config.setBool("sound", "agc", true)
@@ -644,10 +544,6 @@ object SipManager {
             c.config.setInt("sip", "inc_timeout", 60)
             c.config.setInt("sip", "in_call_timeout", 0)
 
-            c.audioDscp = 0x2E
-            c.videoDscp = 0x28
-            c.sipDscp = 0x1A
-
             val coreCodecs = setOf("opus", "G722", "PCMU", "PCMA", "GSM", "telephone-event")
             c.audioPayloadTypes.forEach { pt ->
                 try {
@@ -656,7 +552,7 @@ object SipManager {
                     if (pt.mimeType.equals("opus", ignoreCase = true)) {
                         pt.recvFmtp = "useinbandfec=1; usedtx=0; maxaveragebitrate=40000"
                     }
-                } catch (_: Exception) {}
+                } catch (_: Throwable) {}
             }
             refreshCodecList(c)
 
@@ -666,9 +562,9 @@ object SipManager {
             videoPolicy.automaticallyAccept = true
             videoPolicy.automaticallyInitiate = false
             c.videoActivationPolicy = videoPolicy
-            try { c.setPreferredVideoDefinitionByName("720p") } catch (_: Exception) {}
+            try { c.setPreferredVideoDefinitionByName("720p") } catch (_: Throwable) {}
             c.videoPayloadTypes.forEach { pt ->
-                try { pt.enable(true) } catch (_: Exception) {}
+                try { pt.enable(true) } catch (_: Throwable) {}
             }
 
             val frontCam = c.videoDevicesList.firstOrNull { it.contains("Front", ignoreCase = true) }
@@ -681,10 +577,10 @@ object SipManager {
             c.start()
             core = c
 
-            _isBluetoothAvailable.value = (findBluetoothOutputDevice(c) != null)
+            _isBluetoothAvailable.value = (findBluetoothDevice(c) != null)
 
             registerNetworkWatcher()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     private fun rotateDynamicUdpPortAndRefresh() {
@@ -695,7 +591,7 @@ object SipManager {
         transports.tcpPort = -1
         transports.tlsPort = -1
         c.transports = transports
-        try { c.refreshRegisters() } catch (_: Exception) {}
+        try { c.refreshRegisters() } catch (_: Throwable) {}
     }
 
     private fun registerNetworkWatcher() {
@@ -717,7 +613,7 @@ object SipManager {
                             core?.isNetworkReachable = true
                             core?.refreshRegisters()
                         }
-                    } catch (_: Exception) {}
+                    } catch (_: Throwable) {}
                 }
             }
 
@@ -728,7 +624,7 @@ object SipManager {
                         if (core?.callsNb == 0) {
                             forceNetworkRebind()
                         }
-                    } catch (_: Exception) {}
+                    } catch (_: Throwable) {}
                 }
             }
 
@@ -777,7 +673,7 @@ object SipManager {
                     register(s, u, p, tr)
                 }
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun refreshCodecList(targetCore: Core? = core) {
@@ -786,7 +682,7 @@ object SipManager {
             _audioCodecs.value = c.audioPayloadTypes.map {
                 CodecToggleItem(it.mimeType, it.clockRate, it.enabled())
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun toggleAudioCodec(mime: String, clockRate: Int, enable: Boolean) {
@@ -794,7 +690,7 @@ object SipManager {
             val c = core ?: return
             c.audioPayloadTypes.firstOrNull { it.mimeType == mime && it.clockRate == clockRate }?.enable(enable)
             refreshCodecList(c)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun setVideoViews(remoteView: TextureView?, previewView: TextureView?) {
@@ -802,7 +698,7 @@ object SipManager {
             val c = core ?: return
             c.nativeVideoWindowId = remoteView
             c.nativePreviewWindowId = previewView
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun switchCamera() {
@@ -813,7 +709,7 @@ object SipManager {
             val current = c.videoDevice
             val next = devices.firstOrNull { it != current && !it.contains("StaticImage", true) } ?: return
             c.videoDevice = next
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun toggleVideoDuringCall() {
@@ -826,7 +722,7 @@ object SipManager {
             call.update(params)
             _isVideoCall.value = nextState
             autoRouteBestAudioDevice()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun applyNetworkPolicies(targetCore: Core? = core) {
@@ -873,7 +769,7 @@ object SipManager {
                 natPolicy.isTurnEnabled = false
             }
             c.natPolicy = natPolicy
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun setUseRandomPortQuick(enabled: Boolean) {
@@ -940,11 +836,11 @@ object SipManager {
         _dndEnabled.value = p.getBoolean("dnd", false)
         _autoAnswerEnabled.value = p.getBoolean("auto_ans", false)
         _stunServer.value = p.getString("stun_server", "stun.l.google.com:19302") ?: "stun.l.google.com:19302"
-        _keepAliveSec.value = p.getInt("keep_alive", 10)
+        _keepAliveSec.value = p.getInt("keep_alive", 15)
     }
 
     fun iterate() {
-        try { core?.iterate() } catch (_: Exception) {}
+        try { core?.iterate() } catch (_: Throwable) {}
     }
 
     fun saveAndActivateAccount(
@@ -996,7 +892,7 @@ object SipManager {
             try {
                 core?.clearAccounts()
                 core?.clearAllAuthInfo()
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {}
             _regState.value = "Disconnected"
             _activeAccountId.value = ""
         }
@@ -1035,18 +931,16 @@ object SipManager {
                 c.addAccount(account)
                 c.defaultAccount = account
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
+    // 100% Crash-Free Dialing Method (Identical to the working SIM version)
     fun makeCall(target: String, isVideo: Boolean = false) {
         try {
             val c = core ?: return
             val cleanNumber = target.trim().replace(" ", "")
             if (cleanNumber.isEmpty()) return
 
-            _isVideoCall.value = isVideo
-            acquireLongCallLocks()
-            autoRouteBestAudioDevice()
             c.isNetworkReachable = true
 
             if (c.callsNb > 0) {
@@ -1056,7 +950,7 @@ object SipManager {
                         if (existingCall.state == Call.State.StreamsRunning) {
                             existingCall.pause()
                         }
-                    } catch (_: Exception) {}
+                    } catch (_: Throwable) {}
                 }
             } else {
                 currentSessionNumber = cleanNumber
@@ -1071,20 +965,19 @@ object SipManager {
                 Factory.instance().createAddress(cleanNumber)
             } else {
                 Factory.instance().createAddress("sip:$cleanNumber@$domain")
-            }
+            } ?: return
 
-            if (address != null) {
-                val params = c.createCallParams(null)
-                if (params != null) {
-                    params.isAudioEnabled = true
-                    params.isVideoEnabled = isVideo
-                    try { params.mediaEncryption = MediaEncryption.None } catch (_: Exception) {}
-                    c.inviteAddressWithParams(address, params)
-                } else {
-                    c.inviteAddress(address)
-                }
+            _isVideoCall.value = isVideo
+            val params = c.createCallParams(null)
+            if (params != null) {
+                params.isAudioEnabled = true
+                params.isVideoEnabled = isVideo
+                params.mediaEncryption = MediaEncryption.None
+                c.inviteAddressWithParams(address, params)
+            } else {
+                c.inviteAddress(address)
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun sendMessage(target: String, text: String, viaSimSms: Boolean): Boolean {
@@ -1105,7 +998,7 @@ object SipManager {
                 smsManager.sendMultipartTextMessage(cleanTarget, null, parts, null, null)
                 saveMessage(cleanTarget, cleanText, isOutgoing = true, channel = "SIM SMS")
                 true
-            } catch (e: Exception) {
+            } catch (_: Throwable) {
                 false
             }
         } else {
@@ -1128,7 +1021,7 @@ object SipManager {
                 msg.send()
                 saveMessage(cleanTarget, cleanText, isOutgoing = true, channel = "SIP")
                 true
-            } catch (e: Exception) {
+            } catch (_: Throwable) {
                 false
             }
         }
@@ -1140,7 +1033,7 @@ object SipManager {
             c.currentCall?.pause()
             _isOnHold.value = true
             _isAddingCall.value = true
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun cancelAddCall() {
@@ -1148,7 +1041,7 @@ object SipManager {
             _isAddingCall.value = false
             core?.currentCall?.resume()
             _isOnHold.value = false
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun mergeCallsToConference() {
@@ -1164,7 +1057,7 @@ object SipManager {
                 _isInConference.value = true
                 startLiveTimerIfNotRunning()
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun transferCall(target: String) {
@@ -1178,7 +1071,7 @@ object SipManager {
             if (destAddr != null) {
                 call.transferTo(destAddr)
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun answerCall(withVideo: Boolean = _isVideoCall.value) {
@@ -1186,8 +1079,6 @@ object SipManager {
             val c = core ?: return
             val call = c.currentCall ?: return
             _isVideoCall.value = withVideo
-            acquireLongCallLocks()
-            autoRouteBestAudioDevice()
             val params = c.createCallParams(call)
             if (params != null) {
                 params.isAudioEnabled = true
@@ -1196,13 +1087,13 @@ object SipManager {
             } else {
                 call.accept()
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun hangup() {
         try {
             val c = core ?: return
-            releaseLongCallLocks()
+            releaseCallLocksSafe()
             if (c.callsNb > 0) {
                 c.terminateAllCalls()
             } else {
@@ -1212,7 +1103,7 @@ object SipManager {
             _isVideoCall.value = false
             _isAddingCall.value = false
             _isInConference.value = false
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun toggleMute() {
@@ -1221,7 +1112,7 @@ object SipManager {
             val next = !_isMuted.value
             c.isMicEnabled = !next
             _isMuted.value = next
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun toggleHold() {
@@ -1234,30 +1125,27 @@ object SipManager {
                 call.pause()
                 _isOnHold.value = true
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun toggleSpeaker() {
         try {
             val c = core ?: return
-            c.reloadSoundDevices()
             val next = !_isSpeaker.value
-            if (next) {
-                stopSystemBluetoothSco()
-                val spk = c.audioDevices.firstOrNull { it.type == AudioDevice.Type.Speaker }
-                if (spk != null) c.outputAudioDevice = spk
-                _isSpeaker.value = true
-                _isBluetoothActive.value = false
-            } else {
-                _isSpeaker.value = false
-                autoRouteBestAudioDevice()
+            val targetType = if (next) AudioDevice.Type.Speaker else AudioDevice.Type.Earpiece
+            val device = c.audioDevices.firstOrNull { it.type == targetType }
+            if (device != null) {
+                c.outputAudioDevice = device
+                c.currentCall?.outputAudioDevice = device
             }
-            updateProximitySensorLock()
-        } catch (_: Exception) {}
+            _isSpeaker.value = next
+            if (next) _isBluetoothActive.value = false
+            updateProximityLockSafe()
+        } catch (_: Throwable) {}
     }
 
     fun sendDtmf(digit: Char) {
-        try { core?.currentCall?.sendDtmf(digit) } catch (_: Exception) {}
+        try { core?.currentCall?.sendDtmf(digit) } catch (_: Throwable) {}
     }
 
     fun toggleRecord() {
@@ -1275,7 +1163,7 @@ object SipManager {
                 call.stopRecording()
                 _isRecording.value = false
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     private fun saveMessage(peer: String, body: String, isOutgoing: Boolean, channel: String) {
@@ -1298,7 +1186,7 @@ object SipManager {
             }
             appContext?.getSharedPreferences("sip_msgs", Context.MODE_PRIVATE)
                 ?.edit()?.putString("msgs_json", arr.toString())?.apply()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     private fun loadMessages() {
@@ -1322,7 +1210,7 @@ object SipManager {
                 }
                 _messages.value = list
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     private fun persistAccounts() {
@@ -1340,7 +1228,7 @@ object SipManager {
             }
             appContext?.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
                 ?.edit()?.putString("accounts_json", arr.toString())?.apply()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     private fun loadAccounts() {
@@ -1368,7 +1256,7 @@ object SipManager {
                 }
                 _accounts.value = list
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     private fun addHistory(number: String, type: String, duration: String) {
@@ -1382,7 +1270,7 @@ object SipManager {
             val prefs = appContext?.getSharedPreferences("sip_history", Context.MODE_PRIVATE) ?: return
             val serialized = trimmed.joinToString("||") { "${it.number}::${it.type}::${it.time}::${it.duration}" }
             prefs.edit().putString("logs", serialized).apply()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     private fun loadHistory() {
@@ -1399,6 +1287,6 @@ object SipManager {
                     }
                 }
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 }

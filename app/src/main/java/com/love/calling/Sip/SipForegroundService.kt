@@ -27,13 +27,13 @@ class SipForegroundService : Service() {
         try {
             SipManager.init(this)
             autoRegisterFromPrefs()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
 
         iterateJob = serviceScope.launch {
             while (isActive) {
                 try {
                     SipManager.iterate()
-                } catch (_: Exception) {}
+                } catch (_: Throwable) {}
                 delay(20L)
             }
         }
@@ -43,14 +43,14 @@ class SipForegroundService : Service() {
         val notification = buildNotification("Love Active in Background")
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(1001, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                startForeground(1001, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
             } else {
                 startForeground(1001, notification)
             }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             try {
                 startForeground(1001, notification)
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {}
         }
     }
 
@@ -61,31 +61,21 @@ class SipForegroundService : Service() {
             if (SipManager.regState.value != "Online") {
                 autoRegisterFromPrefs()
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
         return START_STICKY
     }
 
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        try {
-            val restartIntent = Intent(applicationContext, SipForegroundService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                applicationContext.startForegroundService(restartIntent)
-            } else {
-                applicationContext.startService(restartIntent)
-            }
-        } catch (_: Exception) {}
-        super.onTaskRemoved(rootIntent)
-    }
-
     private fun autoRegisterFromPrefs() {
-        val prefs = getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
-        val server = prefs.getString("server", "") ?: ""
-        val user = prefs.getString("user", "") ?: ""
-        val pass = prefs.getString("pass", "") ?: ""
-        val transport = prefs.getString("transport", "UDP") ?: "UDP"
-        if (server.isNotEmpty() && user.isNotEmpty()) {
-            SipManager.register(server, user, pass, transport)
-        }
+        try {
+            val prefs = getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
+            val server = prefs.getString("server", "") ?: ""
+            val user = prefs.getString("user", "") ?: ""
+            val pass = prefs.getString("pass", "") ?: ""
+            val transport = prefs.getString("transport", "UDP") ?: "UDP"
+            if (server.isNotEmpty() && user.isNotEmpty()) {
+                SipManager.register(server, user, pass, transport)
+            }
+        } catch (_: Throwable) {}
     }
 
     private fun createNotificationChannel() {

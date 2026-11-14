@@ -12,9 +12,8 @@
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Bluetooth Earbuds & Headset Audio Routing Permissions -->
@@ -24,8 +23,8 @@
 
     <application
         android:allowBackup="true"
-        android:icon="@drawable/ic_love_logo"
-        android:roundIcon="@drawable/ic_love_logo"
+        android:icon="@drawable/ic_launcher_foreground"
+        android:roundIcon="@drawable/ic_launcher_foreground"
         android:label="Love"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
@@ -46,6 +45,10 @@
             android:name=".sip.SipForegroundService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="phoneCall|dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="sip_voip_keepalive" />
+        </service>
     </application>
 </manifest>

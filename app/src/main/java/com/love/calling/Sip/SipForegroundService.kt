@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -21,34 +22,58 @@ class SipForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(1001, buildNotification("Love SIP Active in Background"))
+        startSafeForeground()
 
-        SipManager.init(this)
-        autoRegisterFromPrefs()
+        try {
+            SipManager.init(this)
+            autoRegisterFromPrefs()
+        } catch (_: Exception) {}
 
         iterateJob = serviceScope.launch {
             while (isActive) {
-                SipManager.iterate()
+                try {
+                    SipManager.iterate()
+                } catch (_: Exception) {}
                 delay(20L)
             }
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        SipManager.init(this)
-        if (SipManager.regState.value != "Online") {
-            autoRegisterFromPrefs()
+    private fun startSafeForeground() {
+        val notification = buildNotification("Love Active in Background")
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(1001, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(1001, notification)
+            }
+        } catch (_: Exception) {
+            try {
+                startForeground(1001, notification)
+            } catch (_: Exception) {}
         }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startSafeForeground()
+        try {
+            SipManager.init(this)
+            if (SipManager.regState.value != "Online") {
+                autoRegisterFromPrefs()
+            }
+        } catch (_: Exception) {}
         return START_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        val restartIntent = Intent(applicationContext, SipForegroundService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            applicationContext.startForegroundService(restartIntent)
-        } else {
-            applicationContext.startService(restartIntent)
-        }
+        try {
+            val restartIntent = Intent(applicationContext, SipForegroundService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                applicationContext.startForegroundService(restartIntent)
+            } else {
+                applicationContext.startService(restartIntent)
+            }
+        } catch (_: Exception) {}
         super.onTaskRemoved(rootIntent)
     }
 
@@ -67,7 +92,7 @@ class SipForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 "love_sip_channel",
-                "Love SIP Background Service",
+                "Love Background Service",
                 NotificationManager.IMPORTANCE_LOW
             )
             val manager = getSystemService(NotificationManager::class.java)
@@ -83,7 +108,7 @@ class SipForegroundService : Service() {
         )
 
         return NotificationCompat.Builder(this, "love_sip_channel")
-            .setContentTitle("Love SIP")
+            .setContentTitle("Love")
             .setContentText(statusText)
             .setSmallIcon(android.R.drawable.sym_action_call)
             .setContentIntent(pendingIntent)

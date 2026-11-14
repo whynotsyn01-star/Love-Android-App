@@ -57,10 +57,9 @@ class SipForegroundService : Service() {
         val server = prefs.getString("server", "") ?: ""
         val user = prefs.getString("user", "") ?: ""
         val pass = prefs.getString("pass", "") ?: ""
-        val port = prefs.getInt("port", 5060)
         val transport = prefs.getString("transport", "UDP") ?: "UDP"
         if (server.isNotEmpty() && user.isNotEmpty()) {
-            SipManager.register(server, user, pass, port, transport)
+            SipManager.register(server, user, pass, transport)
         }
     }
 

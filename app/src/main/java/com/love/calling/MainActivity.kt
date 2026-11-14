@@ -1,7 +1,6 @@
 package com.love.calling
 
 import android.Manifest
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -908,6 +907,7 @@ fun CallActionBtn(label: String, icon: androidx.compose.ui.graphics.vector.Image
 fun MultiAccountScreen() {
     val accounts by SipManager.accounts.collectAsState()
     val activeId by SipManager.activeAccountId.collectAsState()
+    val useRandomPort by SipManager.useRandomPort.collectAsState()
 
     var editingId by remember { mutableStateOf<String?>(null) }
     var label by remember { mutableStateOf("") }
@@ -915,7 +915,6 @@ fun MultiAccountScreen() {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
-    var port by remember { mutableStateOf("") } // ডিফল্ট খালি বা ফাকা রাখা হয়েছে
     var transport by remember { mutableStateOf("UDP") }
 
     Column(
@@ -958,8 +957,8 @@ fun MultiAccountScreen() {
                                 )
                             }
                         }
-                        val portStr = if (acc.port != null) ":${acc.port}" else ""
-                        Text("${acc.username}@${acc.server}$portStr (${acc.transport})", fontSize = 13.sp, color = Color.LightGray)
+                        // এখানে আর :5060 দেখাবে না
+                        Text("${acc.username}@${acc.server} (${acc.transport})", fontSize = 13.sp, color = Color.LightGray)
                     }
 
                     Row {
@@ -969,7 +968,6 @@ fun MultiAccountScreen() {
                             server = acc.server
                             username = acc.username
                             password = acc.password
-                            port = acc.port?.toString() ?: ""
                             transport = acc.transport
                         }) {
                             Icon(Icons.Default.Edit, contentDescription = "Edit", tint = Color.LightGray)
@@ -994,7 +992,7 @@ fun MultiAccountScreen() {
         OutlinedTextField(
             value = label,
             onValueChange = { label = it },
-            label = { Text("Account Name (e.g. Teletalk / Office)") },
+            label = { Text("Account Name (e.g. Sohan Ahmed)") },
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
             singleLine = true
@@ -1033,15 +1031,13 @@ fun MultiAccountScreen() {
             shape = RoundedCornerShape(12.dp),
             singleLine = true
         )
-        // Server Port বক্স - এখন কিছু না লিখলে এটি এক্কেবারে ফাকা থাকবে, অটো কোনো নম্বর বসবে না
-        OutlinedTextField(
-            value = port,
-            onValueChange = { port = it.filter { ch -> ch.isDigit() } },
-            label = { Text("Server Port (Leave blank for default 5060/5061)") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            singleLine = true
+
+        // Server Port বক্সটি সম্পূর্ণ সরিয়ে তার জায়গায় সরাসরি Use random ports (On/Off) দেওয়া হয়েছে
+        SettingToggleCard(
+            title = "Use random ports (Auto-Detect UDP)",
+            subtitle = "Auto-detects working UDP port (1024–65535) for Teletalk SIM & Wi-Fi",
+            checked = useRandomPort,
+            onCheckedChange = { SipManager.setUseRandomPortQuick(it) }
         )
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1057,14 +1053,12 @@ fun MultiAccountScreen() {
 
         Button(
             onClick = {
-                val p = port.toIntOrNull() // ফাকা থাকলে null পাস হবে
-                SipManager.saveAndActivateAccount(editingId, label, server, username, password, p, transport)
+                SipManager.saveAndActivateAccount(editingId, label, server, username, password, transport)
                 editingId = null
                 label = ""
                 server = ""
                 username = ""
                 password = ""
-                port = ""
                 transport = "UDP"
             },
             colors = ButtonDefaults.buttonColors(containerColor = AccentRose),
@@ -1132,7 +1126,7 @@ fun AdvancedNetworkSettingsScreen() {
 
         SettingToggleCard(
             title = "Use random ports",
-            subtitle = "Keep ON to automatically bind registered and ephemeral UDP ports (-1) to bypass carrier blocks",
+            subtitle = "Auto-detects working UDP port across Registered (1024–49151) & Ephemeral (49152–65535) ranges",
             checked = useRandomPort,
             onCheckedChange = { useRandomPort = it }
         )

@@ -18,6 +18,7 @@ import org.linphone.core.*
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.random.Random
 
 data class CallHistoryItem(
     val number: String,
@@ -32,7 +33,6 @@ data class SipAccountItem(
     val server: String,
     val username: String,
     val password: String,
-    val port: Int?, // Nullable যাতে ফাকা রাখা যায়
     val transport: String
 )
 
@@ -55,6 +55,7 @@ object SipManager {
     private var core: Core? = null
     private var appContext: Context? = null
     private var networkCallbackRegistered = false
+    private var portRetryCount = 0
 
     private val managerScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var timerJob: Job? = null
@@ -187,12 +188,27 @@ object SipManager {
             state: RegistrationState,
             message: String
         ) {
-            _regState.value = when (state) {
-                RegistrationState.Ok -> "Online"
-                RegistrationState.Progress -> "Connecting..."
-                RegistrationState.Failed -> "Failed: $message"
-                RegistrationState.Cleared -> "Disconnected"
-                else -> "Offline"
+            when (state) {
+                RegistrationState.Ok -> {
+                    portRetryCount = 0
+                    _regState.value = "Online"
+                }
+                RegistrationState.Progress -> {
+                    _regState.value = "Connecting..."
+                }
+                RegistrationState.Failed -> {
+                    _regState.value = "Failed: $message"
+                    // যদি ওই নেটওয়ার্কে বর্তমান UDP পোর্ট ব্লক থাকে, তবে অটোমেটিক নতুন আরেকটি পোর্ট খুঁজে রিকানেক্ট করবে
+                    if (_useRandomPort.value && portRetryCount < 3) {
+                        portRetryCount++
+                        managerScope.launch {
+                            delay(1200L)
+                            rotateDynamicUdpPortAndRefresh()
+                        }
+                    }
+                }
+                RegistrationState.Cleared -> _regState.value = "Disconnected"
+                else -> _regState.value = "Offline"
             }
         }
 
@@ -228,7 +244,7 @@ object SipManager {
             }
 
             when (state) {
-                Call.State.OutgoingInit, Call.State.OutgoingProgress, Call.State.OutgoingRinging -> {
+                Call.State.OutgoingInit, Call.State.OutgoingProgress, Call.State.OutgoingRinging, Call.State.OutgoingEarlyMedia -> {
                     if (core.callsNb <= 1) {
                         wasAnswered = false
                         currentSessionNumber = number
@@ -237,7 +253,7 @@ object SipManager {
                     _callState.value = "Calling..."
                     _isAddingCall.value = false
                 }
-                Call.State.IncomingReceived -> {
+                Call.State.IncomingReceived, Call.State.IncomingEarlyMedia -> {
                     if (_dndEnabled.value) {
                         call.decline(Reason.Busy)
                         addHistory(number, "Missed (DND)", "00:00")
@@ -254,7 +270,7 @@ object SipManager {
                         answerCall(withVideo = hasVideo)
                     }
                 }
-                Call.State.StreamsRunning -> {
+                Call.State.Connected, Call.State.StreamsRunning -> {
                     wasAnswered = true
                     _callState.value = "Connected"
                     _isOnHold.value = false
@@ -322,9 +338,14 @@ object SipManager {
         c.config.setInt("rtp", "video_jitt_comp", 80)
         c.config.setBool("sound", "ec_state", true)
 
-        c.audioPayloadTypes.forEach { pt ->
-            pt.enable(true)
-        }
+        // Prioritize standard telecom codecs first (PCMU, PCMA, G722, Opus, GSM) so no PBX rejects the call
+        val priorityOrder = listOf("PCMU", "PCMA", "G722", "opus", "GSM", "iLBC", "speex")
+        val sortedAudio = c.audioPayloadTypes.sortedBy { pt ->
+            val idx = priorityOrder.indexOfFirst { it.equals(pt.mimeType, ignoreCase = true) }
+            if (idx == -1) 99 else idx
+        }.toTypedArray()
+        c.audioPayloadTypes = sortedAudio
+        c.audioPayloadTypes.forEach { pt -> pt.enable(true) }
         refreshCodecList(c)
 
         c.isVideoCaptureEnabled = true
@@ -334,9 +355,7 @@ object SipManager {
         videoPolicy.automaticallyInitiate = false
         c.videoActivationPolicy = videoPolicy
         c.setPreferredVideoDefinitionByName("720p")
-        c.videoPayloadTypes.forEach { pt ->
-            pt.enable(true)
-        }
+        c.videoPayloadTypes.forEach { pt -> pt.enable(true) }
 
         val frontCam = c.videoDevicesList.firstOrNull { it.contains("Front", ignoreCase = true) }
             ?: c.videoDevicesList.firstOrNull()
@@ -351,6 +370,21 @@ object SipManager {
         registerNetworkWatcher()
     }
 
+    // কোনো পোর্ট ব্লক থাকলে Registered (1024-49151) ও Dynamic/Ephemeral (49152-65535) রেঞ্জ থেকে অটো নতুন পোর্ট বেছে নেবে
+    private fun rotateDynamicUdpPortAndRefresh() {
+        val c = core ?: return
+        if (!_useRandomPort.value || c.callsNb > 0) return
+        val transports = c.transports
+        // 1024 থেকে 65535-এর যেকোনো ওপেন UDP পোর্ট অথবা সিস্টেম অটো (-1) অ্যাসাইন করবে
+        transports.udpPort = if (portRetryCount % 2 == 1) Random.nextInt(10000, 65000) else -1
+        transports.tcpPort = -1
+        transports.tlsPort = -1
+        c.transports = transports
+        c.setAudioPortRange(10000, 60000)
+        c.setVideoPortRange(10000, 60000)
+        c.refreshRegisters()
+    }
+
     private fun registerNetworkWatcher() {
         if (networkCallbackRegistered) return
         val ctx = appContext ?: return
@@ -362,8 +396,10 @@ object SipManager {
         cm.registerNetworkCallback(req, object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 managerScope.launch {
-                    delay(800L)
-                    forceNetworkRebind()
+                    delay(700L)
+                    if (core?.callsNb == 0) {
+                        forceNetworkRebind()
+                    }
                 }
             }
 
@@ -372,10 +408,8 @@ object SipManager {
                 if (_useWifiOnly.value && !isWifi) {
                     core?.isNetworkReachable = false
                     _regState.value = "WiFi Only Mode"
-                } else {
-                    if (core?.isNetworkReachable == false) {
-                        forceNetworkRebind()
-                    }
+                } else if (core?.isNetworkReachable == false) {
+                    forceNetworkRebind()
                 }
             }
         })
@@ -385,6 +419,7 @@ object SipManager {
     fun forceNetworkRebind() {
         val c = core ?: return
         val ctx = appContext ?: return
+        if (c.callsNb > 0) return
 
         if (_useWifiOnly.value) {
             val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -397,8 +432,14 @@ object SipManager {
             }
         }
 
+        // যদি ইতিমধ্যে Online থাকে, তবে শুধু রেজিস্ট্রেশন রিফ্রেশ করবে যাতে কল না কাটে
+        if (_regState.value == "Online" && c.accountList.isNotEmpty()) {
+            c.isNetworkReachable = true
+            c.refreshRegisters()
+            return
+        }
+
         applyNetworkPolicies(c)
-        c.isNetworkReachable = false
         c.isNetworkReachable = true
 
         if (c.accountList.isNotEmpty()) {
@@ -408,10 +449,9 @@ object SipManager {
             val s = prefs.getString("server", "") ?: ""
             val u = prefs.getString("user", "") ?: ""
             val p = prefs.getString("pass", "") ?: ""
-            val port = prefs.getInt("port", 5060)
             val tr = prefs.getString("transport", "UDP") ?: "UDP"
             if (s.isNotEmpty() && u.isNotEmpty()) {
-                register(s, u, p, port, tr)
+                register(s, u, p, tr)
             }
         }
     }
@@ -462,13 +502,18 @@ object SipManager {
 
         val transports = c.transports
         if (_useRandomPort.value) {
-            transports.udpPort = -1 // Dynamic / Ephemeral (Registered & Dynamic Ports auto-assigned)
+            // Use Random Port ON: সব UDP পোর্ট (Registered 1024-49151 এবং Dynamic/Ephemeral 49152-65535) থেকে অটো ডিটেক্ট করবে
+            transports.udpPort = -1
             transports.tcpPort = -1
             transports.tlsPort = -1
+            c.setAudioPortRange(10000, 60000)
+            c.setVideoPortRange(10000, 60000)
         } else {
             transports.udpPort = 5060
             transports.tcpPort = 5060
             transports.tlsPort = 5061
+            c.setAudioPortRange(10000, 20000)
+            c.setVideoPortRange(20000, 30000)
         }
         c.transports = transports
 
@@ -484,6 +529,17 @@ object SipManager {
         natPolicy.isStunEnabled = _enableStunIce.value
         natPolicy.isIceEnabled = _enableStunIce.value
         c.natPolicy = natPolicy
+    }
+
+    fun setUseRandomPortQuick(enabled: Boolean) {
+        _useRandomPort.value = enabled
+        appContext?.getSharedPreferences("sip_adv_prefs", Context.MODE_PRIVATE)
+            ?.edit()?.putBoolean("random_port", enabled)?.apply()
+        applyNetworkPolicies()
+        val activeAcc = _accounts.value.firstOrNull { it.id == _activeAccountId.value }
+        if (activeAcc != null) {
+            activateAccount(activeAcc)
+        }
     }
 
     fun updateAdvancedSettings(
@@ -552,7 +608,6 @@ object SipManager {
         server: String,
         user: String,
         pass: String,
-        port: Int?, // Nullable port
         transport: String
     ) {
         val cleanServer = server.trim()
@@ -561,7 +616,7 @@ object SipManager {
 
         val finalId = if (id.isNullOrEmpty()) UUID.randomUUID().toString() else id
         val finalLabel = label.trim().ifEmpty { "$cleanUser@$cleanServer" }
-        val newItem = SipAccountItem(finalId, finalLabel, cleanServer, cleanUser, pass, port, transport)
+        val newItem = SipAccountItem(finalId, finalLabel, cleanServer, cleanUser, pass, transport)
 
         val current = _accounts.value.toMutableList()
         val idx = current.indexOfFirst { it.id == finalId }
@@ -575,21 +630,16 @@ object SipManager {
 
     fun activateAccount(item: SipAccountItem) {
         _activeAccountId.value = item.id
-        val editor = appContext?.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)?.edit()
+        appContext?.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)?.edit()
             ?.putString("active_id", item.id)
             ?.putString("server", item.server)
             ?.putString("user", item.username)
             ?.putString("pass", item.password)
             ?.putString("transport", item.transport)
+            ?.remove("port")
+            ?.apply()
 
-        if (item.port != null) {
-            editor?.putInt("port", item.port)
-        } else {
-            editor?.remove("port")
-        }
-        editor?.apply()
-
-        register(item.server, item.username, item.password, item.port, item.transport)
+        register(item.server, item.username, item.password, item.transport)
     }
 
     fun deleteAccount(id: String) {
@@ -605,8 +655,10 @@ object SipManager {
         }
     }
 
-    fun register(server: String, user: String, pass: String, port: Int?, transportMode: String) {
+    // এখানে আর কোনো ফিক্সড :5060 যোগ করা হয়নি—সরাসরি সার্ভার ডোমেইন/আইপি ও ট্রান্সপোর্ট দিয়ে কানেক্ট হবে
+    fun register(server: String, user: String, pass: String, transportMode: String) {
         val c = core ?: return
+        portRetryCount = 0
         applyNetworkPolicies(c)
         c.clearAccounts()
         c.clearAllAuthInfo()
@@ -615,16 +667,14 @@ object SipManager {
         val cleanUser = user.trim()
         if (cleanServer.isEmpty() || cleanUser.isEmpty()) return
 
-        val authInfo = Factory.instance().createAuthInfo(cleanUser, null, pass, null, null, cleanServer, null)
+        val hostOnly = cleanServer.substringBefore(":")
+        val authInfo = Factory.instance().createAuthInfo(cleanUser, null, pass, null, null, hostOnly, null)
         c.addAuthInfo(authInfo)
 
         val accountParams = c.createAccountParams()
-        val identity = Factory.instance().createAddress("sip:$cleanUser@$cleanServer")
+        val identity = Factory.instance().createAddress("sip:$cleanUser@$hostOnly")
         val trans = transportMode.lowercase(Locale.US)
-        
-        // যদি পোর্ট ফাকা থাকে, তবে কোড নিজে থেকে UDP-এর জন্য 5060 এবং TLS-এর জন্য 5061 ধরে নেবে
-        val finalPort = port ?: if (trans == "tls") 5061 else 5060
-        val serverAddr = Factory.instance().createAddress("sip:$cleanServer:$finalPort;transport=$trans")
+        val serverAddr = Factory.instance().createAddress("sip:$cleanServer;transport=$trans")
 
         if (identity != null && serverAddr != null) {
             accountParams.identityAddress = identity
@@ -655,7 +705,10 @@ object SipManager {
             currentSessionDir = if (isVideo) "Video Outgoing" else "Outgoing"
         }
 
-        val domain = c.defaultAccount?.params?.identityAddress?.domain ?: return
+        val domain = c.defaultAccount?.params?.identityAddress?.domain
+            ?: appContext?.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)?.getString("server", "")?.substringBefore(":")
+            ?: return
+
         val address = if (cleanNumber.startsWith("sip:")) {
             Factory.instance().createAddress(cleanNumber)
         } else {
@@ -878,7 +931,6 @@ object SipManager {
             obj.put("server", acc.server)
             obj.put("username", acc.username)
             obj.put("password", acc.password)
-            if (acc.port != null) obj.put("port", acc.port)
             obj.put("transport", acc.transport)
             arr.put(obj)
         }
@@ -904,8 +956,7 @@ object SipManager {
                         server = o.getString("server"),
                         username = o.getString("username"),
                         password = o.getString("password"),
-                        port = if (o.has("port")) o.getInt("port") else null,
-                        transport = o.optString("transport", if (o.optBoolean("useTls", false)) "TLS" else "UDP")
+                        transport = o.optString("transport", "UDP")
                     )
                 )
             }

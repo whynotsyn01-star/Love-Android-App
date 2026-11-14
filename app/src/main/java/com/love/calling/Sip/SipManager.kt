@@ -411,7 +411,7 @@ object SipManager {
                 val elapsed = ((System.currentTimeMillis() - callStartTimeMs) / 1000L).coerceAtLeast(1L)
                 _callDurationSec.value = elapsed
                 if (elapsed % 25L == 0L) {
-                    core?.refreshRegisters()
+                    try { core?.refreshRegisters() } catch (_: Exception) {}
                 }
                 delay(1000L)
             }
@@ -474,11 +474,13 @@ object SipManager {
         }
 
         override fun onMessageReceived(core: Core, room: ChatRoom, message: ChatMessage) {
-            val sender = message.fromAddress.username ?: message.fromAddress.asStringUriOnly()
-            val text = message.utf8Text ?: return
-            if (text.isNotEmpty()) {
-                saveMessage(sender, text, isOutgoing = false, channel = "SIP")
-            }
+            try {
+                val sender = message.fromAddress.username ?: message.fromAddress.asStringUriOnly()
+                val text = message.utf8Text ?: return
+                if (text.isNotEmpty()) {
+                    saveMessage(sender, text, isOutgoing = false, channel = "SIP")
+                }
+            } catch (_: Exception) {}
         }
 
         override fun onCallStateChanged(
@@ -487,125 +489,127 @@ object SipManager {
             state: Call.State,
             message: String
         ) {
-            _activeCallsCount.value = core.callsNb
-            val inConf = core.conference != null && (core.conference?.participantCount ?: 0) >= 2
-            _isInConference.value = inConf
+            try {
+                _activeCallsCount.value = core.callsNb
+                val inConf = core.conference != null && (core.conference?.participantCount ?: 0) >= 2
+                _isInConference.value = inConf
 
-            val hasVideo = call.currentParams?.isVideoEnabled == true || call.remoteParams?.isVideoEnabled == true
-            _isVideoCall.value = hasVideo
+                val hasVideo = try { call.currentParams?.isVideoEnabled == true || call.remoteParams?.isVideoEnabled == true } catch (_: Exception) { false }
+                _isVideoCall.value = hasVideo
 
-            val number = call.remoteAddress.username ?: call.remoteAddress.asStringUriOnly()
-            if (currentSessionNumber.isEmpty()) {
-                currentSessionNumber = number
-            }
-            _remoteNumber.value = if (inConf || core.callsNb > 1) {
-                "Conference (${core.callsNb} Calls)"
-            } else {
-                number
-            }
+                val number = try { call.remoteAddress.username ?: call.remoteAddress.asStringUriOnly() } catch (_: Exception) { "Unknown" }
+                if (currentSessionNumber.isEmpty()) {
+                    currentSessionNumber = number
+                }
+                _remoteNumber.value = if (inConf || core.callsNb > 1) {
+                    "Conference (${core.callsNb} Calls)"
+                } else {
+                    number
+                }
 
-            when (state) {
-                Call.State.OutgoingInit, Call.State.OutgoingProgress -> {
-                    acquireLongCallLocks()
-                    autoRouteBestAudioDevice()
-                    if (core.callsNb <= 1) {
-                        wasAnswered = false
-                        timerJob?.cancel()
-                        timerJob = null
-                        callStartTimeMs = 0L
-                        _callDurationSec.value = 0L
-                        currentSessionNumber = number
-                        currentSessionDir = if (hasVideo) "Video Outgoing" else "Outgoing"
-                    }
-                    _callState.value = "Calling..."
-                    _isAddingCall.value = false
-                }
-                Call.State.OutgoingRinging, Call.State.OutgoingEarlyMedia -> {
-                    acquireLongCallLocks()
-                    autoRouteBestAudioDevice()
-                    if (core.callsNb <= 1 && !wasAnswered) {
-                        _callDurationSec.value = 0L
-                    }
-                    _callState.value = "Ringing..."
-                    _isAddingCall.value = false
-                }
-                Call.State.IncomingReceived, Call.State.IncomingEarlyMedia -> {
-                    if (_dndEnabled.value) {
-                        call.decline(Reason.Busy)
-                        addHistory(number, "Missed (DND)", "00:00")
-                        return
-                    }
-                    acquireLongCallLocks()
-                    autoRouteBestAudioDevice()
-                    if (core.callsNb <= 1) {
-                        wasAnswered = false
-                        timerJob?.cancel()
-                        timerJob = null
-                        callStartTimeMs = 0L
-                        _callDurationSec.value = 0L
-                        currentSessionNumber = number
-                        currentSessionDir = if (hasVideo) "Video Incoming" else "Incoming"
-                    }
-                    _callState.value = "Incoming"
-                    _isAddingCall.value = false
-                    if (_autoAnswerEnabled.value) {
-                        answerCall(withVideo = hasVideo)
-                    }
-                }
-                Call.State.Connected, Call.State.StreamsRunning -> {
-                    wasAnswered = true
-                    _callState.value = "Active"
-                    _isOnHold.value = false
-                    _isAddingCall.value = false
-                    acquireLongCallLocks()
-                    autoRouteBestAudioDevice()
-                    startLiveTimerIfNotRunning()
-                }
-                Call.State.Paused, Call.State.PausedByRemote -> {
-                    if (core.callsNb == 1 && !inConf) {
-                        _callState.value = "On Hold"
-                        _isOnHold.value = true
-                    }
-                }
-                Call.State.End, Call.State.Released, Call.State.Error -> {
-                    _activeCallsCount.value = core.callsNb
-                    if (core.callsNb == 0) {
-                        releaseLongCallLocks()
-                        val totalDurationStr = if (wasAnswered) stopLiveTimerAndGetFormatted() else {
+                when (state) {
+                    Call.State.OutgoingInit, Call.State.OutgoingProgress -> {
+                        acquireLongCallLocks()
+                        autoRouteBestAudioDevice()
+                        if (core.callsNb <= 1) {
+                            wasAnswered = false
                             timerJob?.cancel()
                             timerJob = null
                             callStartTimeMs = 0L
                             _callDurationSec.value = 0L
-                            "00:00"
+                            currentSessionNumber = number
+                            currentSessionDir = if (hasVideo) "Video Outgoing" else "Outgoing"
                         }
-                        val logType = if (!wasAnswered && currentSessionDir.contains("Incoming")) {
-                            "Missed"
-                        } else if (inConf) {
-                            "Conference"
-                        } else {
-                            currentSessionDir
-                        }
-                        addHistory(currentSessionNumber.ifEmpty { number }, logType, totalDurationStr)
-
-                        currentSessionNumber = ""
-                        wasAnswered = false
-                        _callState.value = "Idle"
-                        _isVideoCall.value = false
-                        _isMuted.value = false
-                        _isSpeaker.value = false
-                        _isBluetoothActive.value = false
-                        _isOnHold.value = false
-                        _isRecording.value = false
-                        _isInConference.value = false
+                        _callState.value = "Calling..."
                         _isAddingCall.value = false
-                    } else {
-                        _callState.value = "Active"
-                        core.currentCall?.resume()
-                        autoRouteBestAudioDevice()
                     }
+                    Call.State.OutgoingRinging, Call.State.OutgoingEarlyMedia -> {
+                        acquireLongCallLocks()
+                        autoRouteBestAudioDevice()
+                        if (core.callsNb <= 1 && !wasAnswered) {
+                            _callDurationSec.value = 0L
+                        }
+                        _callState.value = "Ringing..."
+                        _isAddingCall.value = false
+                    }
+                    Call.State.IncomingReceived, Call.State.IncomingEarlyMedia -> {
+                        if (_dndEnabled.value) {
+                            try { call.decline(Reason.Busy) } catch (_: Exception) {}
+                            addHistory(number, "Missed (DND)", "00:00")
+                            return
+                        }
+                        acquireLongCallLocks()
+                        autoRouteBestAudioDevice()
+                        if (core.callsNb <= 1) {
+                            wasAnswered = false
+                            timerJob?.cancel()
+                            timerJob = null
+                            callStartTimeMs = 0L
+                            _callDurationSec.value = 0L
+                            currentSessionNumber = number
+                            currentSessionDir = if (hasVideo) "Video Incoming" else "Incoming"
+                        }
+                        _callState.value = "Incoming"
+                        _isAddingCall.value = false
+                        if (_autoAnswerEnabled.value) {
+                            answerCall(withVideo = hasVideo)
+                        }
+                    }
+                    Call.State.Connected, Call.State.StreamsRunning -> {
+                        wasAnswered = true
+                        _callState.value = "Active"
+                        _isOnHold.value = false
+                        _isAddingCall.value = false
+                        acquireLongCallLocks()
+                        autoRouteBestAudioDevice()
+                        startLiveTimerIfNotRunning()
+                    }
+                    Call.State.Paused, Call.State.PausedByRemote -> {
+                        if (core.callsNb == 1 && !inConf) {
+                            _callState.value = "On Hold"
+                            _isOnHold.value = true
+                        }
+                    }
+                    Call.State.End, Call.State.Released, Call.State.Error -> {
+                        _activeCallsCount.value = core.callsNb
+                        if (core.callsNb == 0) {
+                            releaseLongCallLocks()
+                            val totalDurationStr = if (wasAnswered) stopLiveTimerAndGetFormatted() else {
+                                timerJob?.cancel()
+                                timerJob = null
+                                callStartTimeMs = 0L
+                                _callDurationSec.value = 0L
+                                "00:00"
+                            }
+                            val logType = if (!wasAnswered && currentSessionDir.contains("Incoming")) {
+                                "Missed"
+                            } else if (inConf) {
+                                "Conference"
+                            } else {
+                                currentSessionDir
+                            }
+                            addHistory(currentSessionNumber.ifEmpty { number }, logType, totalDurationStr)
+
+                            currentSessionNumber = ""
+                            wasAnswered = false
+                            _callState.value = "Idle"
+                            _isVideoCall.value = false
+                            _isMuted.value = false
+                            _isSpeaker.value = false
+                            _isBluetoothActive.value = false
+                            _isOnHold.value = false
+                            _isRecording.value = false
+                            _isInConference.value = false
+                            _isAddingCall.value = false
+                        } else {
+                            _callState.value = "Active"
+                            try { core.currentCall?.resume() } catch (_: Exception) {}
+                            autoRouteBestAudioDevice()
+                        }
+                    }
+                    else -> {}
                 }
-                else -> {}
-            }
+            } catch (_: Exception) {}
         }
     }
 
@@ -625,8 +629,8 @@ object SipManager {
             applyNetworkPolicies(c)
 
             c.isEchoCancellationEnabled = true
-            c.micGainDb = 2.0f
-            c.playbackGainDb = 2.5f
+            try { c.micGainDb = 2.0f } catch (_: Exception) {}
+            try { c.playbackGainDb = 2.5f } catch (_: Exception) {}
             c.config.setBool("sound", "ec_state", true)
             c.config.setBool("sound", "noisegate", true)
             c.config.setBool("sound", "agc", true)
@@ -646,11 +650,13 @@ object SipManager {
 
             val coreCodecs = setOf("opus", "G722", "PCMU", "PCMA", "GSM", "telephone-event")
             c.audioPayloadTypes.forEach { pt ->
-                val shouldEnable = coreCodecs.any { it.equals(pt.mimeType, ignoreCase = true) }
-                pt.enable(shouldEnable)
-                if (pt.mimeType.equals("opus", ignoreCase = true)) {
-                    pt.recvFmtp = "useinbandfec=1; usedtx=0; maxaveragebitrate=40000"
-                }
+                try {
+                    val shouldEnable = coreCodecs.any { it.equals(pt.mimeType, ignoreCase = true) }
+                    pt.enable(shouldEnable)
+                    if (pt.mimeType.equals("opus", ignoreCase = true)) {
+                        pt.recvFmtp = "useinbandfec=1; usedtx=0; maxaveragebitrate=40000"
+                    }
+                } catch (_: Exception) {}
             }
             refreshCodecList(c)
 
@@ -660,9 +666,9 @@ object SipManager {
             videoPolicy.automaticallyAccept = true
             videoPolicy.automaticallyInitiate = false
             c.videoActivationPolicy = videoPolicy
-            c.setPreferredVideoDefinitionByName("720p")
+            try { c.setPreferredVideoDefinitionByName("720p") } catch (_: Exception) {}
             c.videoPayloadTypes.forEach { pt ->
-                pt.enable(true)
+                try { pt.enable(true) } catch (_: Exception) {}
             }
 
             val frontCam = c.videoDevicesList.firstOrNull { it.contains("Front", ignoreCase = true) }
@@ -689,7 +695,7 @@ object SipManager {
         transports.tcpPort = -1
         transports.tlsPort = -1
         c.transports = transports
-        c.refreshRegisters()
+        try { c.refreshRegisters() } catch (_: Exception) {}
     }
 
     private fun registerNetworkWatcher() {
@@ -704,21 +710,25 @@ object SipManager {
             override fun onAvailable(network: Network) {
                 managerScope.launch {
                     delay(500L)
-                    if (core?.callsNb == 0) {
-                        forceNetworkRebind()
-                    } else {
-                        core?.isNetworkReachable = true
-                        core?.refreshRegisters()
-                    }
+                    try {
+                        if (core?.callsNb == 0) {
+                            forceNetworkRebind()
+                        } else {
+                            core?.isNetworkReachable = true
+                            core?.refreshRegisters()
+                        }
+                    } catch (_: Exception) {}
                 }
             }
 
             override fun onLost(network: Network) {
                 managerScope.launch {
                     delay(600L)
-                    if (core?.callsNb == 0) {
-                        forceNetworkRebind()
-                    }
+                    try {
+                        if (core?.callsNb == 0) {
+                            forceNetworkRebind()
+                        }
+                    } catch (_: Exception) {}
                 }
             }
 
@@ -771,87 +781,99 @@ object SipManager {
     }
 
     fun refreshCodecList(targetCore: Core? = core) {
-        val c = targetCore ?: return
-        _audioCodecs.value = c.audioPayloadTypes.map {
-            CodecToggleItem(it.mimeType, it.clockRate, it.enabled())
-        }
+        try {
+            val c = targetCore ?: return
+            _audioCodecs.value = c.audioPayloadTypes.map {
+                CodecToggleItem(it.mimeType, it.clockRate, it.enabled())
+            }
+        } catch (_: Exception) {}
     }
 
     fun toggleAudioCodec(mime: String, clockRate: Int, enable: Boolean) {
-        val c = core ?: return
-        c.audioPayloadTypes.firstOrNull { it.mimeType == mime && it.clockRate == clockRate }?.enable(enable)
-        refreshCodecList(c)
+        try {
+            val c = core ?: return
+            c.audioPayloadTypes.firstOrNull { it.mimeType == mime && it.clockRate == clockRate }?.enable(enable)
+            refreshCodecList(c)
+        } catch (_: Exception) {}
     }
 
     fun setVideoViews(remoteView: TextureView?, previewView: TextureView?) {
-        val c = core ?: return
-        c.nativeVideoWindowId = remoteView
-        c.nativePreviewWindowId = previewView
+        try {
+            val c = core ?: return
+            c.nativeVideoWindowId = remoteView
+            c.nativePreviewWindowId = previewView
+        } catch (_: Exception) {}
     }
 
     fun switchCamera() {
-        val c = core ?: return
-        val devices = c.videoDevicesList
-        if (devices.size < 2) return
-        val current = c.videoDevice
-        val next = devices.firstOrNull { it != current && !it.contains("StaticImage", true) } ?: return
-        c.videoDevice = next
+        try {
+            val c = core ?: return
+            val devices = c.videoDevicesList
+            if (devices.size < 2) return
+            val current = c.videoDevice
+            val next = devices.firstOrNull { it != current && !it.contains("StaticImage", true) } ?: return
+            c.videoDevice = next
+        } catch (_: Exception) {}
     }
 
     fun toggleVideoDuringCall() {
-        val c = core ?: return
-        val call = c.currentCall ?: return
-        val params = c.createCallParams(call) ?: return
-        val nextState = !(call.currentParams?.isVideoEnabled ?: false)
-        params.isVideoEnabled = nextState
-        call.update(params)
-        _isVideoCall.value = nextState
-        autoRouteBestAudioDevice()
+        try {
+            val c = core ?: return
+            val call = c.currentCall ?: return
+            val params = c.createCallParams(call) ?: return
+            val nextState = !(call.currentParams?.isVideoEnabled ?: false)
+            params.isVideoEnabled = nextState
+            call.update(params)
+            _isVideoCall.value = nextState
+            autoRouteBestAudioDevice()
+        } catch (_: Exception) {}
     }
 
     fun applyNetworkPolicies(targetCore: Core? = core) {
-        val c = targetCore ?: return
+        try {
+            val c = targetCore ?: return
 
-        c.isIpv6Enabled = _allowIpv6.value
-        c.config.setBool("net", "allow_ipv6", _allowIpv6.value)
+            c.isIpv6Enabled = _allowIpv6.value
+            c.config.setBool("net", "allow_ipv6", _allowIpv6.value)
 
-        val transports = c.transports
-        if (_useRandomPort.value) {
-            transports.udpPort = -1
-            transports.tcpPort = -1
-            transports.tlsPort = -1
-            c.config.setInt("rtp", "audio_rtp_port", -1)
-            c.config.setInt("rtp", "video_rtp_port", -1)
-        } else {
-            transports.udpPort = 5060
-            transports.tcpPort = 5060
-            transports.tlsPort = 5061
-            c.config.setInt("rtp", "audio_rtp_port", 7078)
-            c.config.setInt("rtp", "video_rtp_port", 9078)
-        }
-        c.transports = transports
+            val transports = c.transports
+            if (_useRandomPort.value) {
+                transports.udpPort = -1
+                transports.tcpPort = -1
+                transports.tlsPort = -1
+                c.config.setInt("rtp", "audio_rtp_port", -1)
+                c.config.setInt("rtp", "video_rtp_port", -1)
+            } else {
+                transports.udpPort = 5060
+                transports.tcpPort = 5060
+                transports.tlsPort = 5061
+                c.config.setInt("rtp", "audio_rtp_port", 7078)
+                c.config.setInt("rtp", "video_rtp_port", 9078)
+            }
+            c.transports = transports
 
-        c.config.setBool("rtp", "symmetric", _enableRportSymmetric.value)
-        c.config.setBool("rtp", "rtp_keepalive", true)
-        c.config.setBool("sip", "rport", true)
-        c.config.setBool("sip", "use_rport", true)
-        c.config.setInt("sip", "contact_rewrite", 1)
-        c.config.setInt("net", "mtu", 1300)
+            c.config.setBool("rtp", "symmetric", _enableRportSymmetric.value)
+            c.config.setBool("rtp", "rtp_keepalive", true)
+            c.config.setBool("sip", "rport", true)
+            c.config.setBool("sip", "use_rport", true)
+            c.config.setInt("sip", "contact_rewrite", 1)
+            c.config.setInt("net", "mtu", 1300)
 
-        c.isKeepAliveEnabled = true
-        c.config.setInt("sip", "keep_alive_period", _keepAliveSec.value * 1000)
+            c.isKeepAliveEnabled = true
+            c.config.setInt("sip", "keep_alive_period", _keepAliveSec.value * 1000)
 
-        val natPolicy = c.createNatPolicy()
-        if (_enableStunIce.value && _stunServer.value.isNotBlank()) {
-            natPolicy.stunServer = _stunServer.value.trim()
-            natPolicy.isStunEnabled = true
-            natPolicy.isIceEnabled = true
-        } else {
-            natPolicy.isStunEnabled = false
-            natPolicy.isIceEnabled = false
-            natPolicy.isTurnEnabled = false
-        }
-        c.natPolicy = natPolicy
+            val natPolicy = c.createNatPolicy()
+            if (_enableStunIce.value && _stunServer.value.isNotBlank()) {
+                natPolicy.stunServer = _stunServer.value.trim()
+                natPolicy.isStunEnabled = true
+                natPolicy.isIceEnabled = true
+            } else {
+                natPolicy.isStunEnabled = false
+                natPolicy.isIceEnabled = false
+                natPolicy.isTurnEnabled = false
+            }
+            c.natPolicy = natPolicy
+        } catch (_: Exception) {}
     }
 
     fun setUseRandomPortQuick(enabled: Boolean) {
@@ -922,7 +944,7 @@ object SipManager {
     }
 
     fun iterate() {
-        core?.iterate()
+        try { core?.iterate() } catch (_: Exception) {}
     }
 
     fun saveAndActivateAccount(
@@ -971,8 +993,10 @@ object SipManager {
         _accounts.value = current
         persistAccounts()
         if (_activeAccountId.value == id) {
-            core?.clearAccounts()
-            core?.clearAllAuthInfo()
+            try {
+                core?.clearAccounts()
+                core?.clearAllAuthInfo()
+            } catch (_: Exception) {}
             _regState.value = "Disconnected"
             _activeAccountId.value = ""
         }
@@ -1028,9 +1052,11 @@ object SipManager {
             if (c.callsNb > 0) {
                 currentSessionNumber = "$currentSessionNumber & $cleanNumber"
                 c.calls.forEach { existingCall ->
-                    if (existingCall.state == Call.State.StreamsRunning) {
-                        existingCall.pause()
-                    }
+                    try {
+                        if (existingCall.state == Call.State.StreamsRunning) {
+                            existingCall.pause()
+                        }
+                    } catch (_: Exception) {}
                 }
             } else {
                 currentSessionNumber = cleanNumber
@@ -1049,10 +1075,14 @@ object SipManager {
 
             if (address != null) {
                 val params = c.createCallParams(null)
-                params?.isAudioEnabled = true
-                params?.isVideoEnabled = isVideo
-                params?.mediaEncryption = MediaEncryption.None
-                c.inviteAddressWithParams(address, params!!)
+                if (params != null) {
+                    params.isAudioEnabled = true
+                    params.isVideoEnabled = isVideo
+                    try { params.mediaEncryption = MediaEncryption.None } catch (_: Exception) {}
+                    c.inviteAddressWithParams(address, params)
+                } else {
+                    c.inviteAddress(address)
+                }
             }
         } catch (_: Exception) {}
     }
@@ -1105,88 +1135,106 @@ object SipManager {
     }
 
     fun prepareAddCall() {
-        val c = core ?: return
-        c.currentCall?.pause()
-        _isOnHold.value = true
-        _isAddingCall.value = true
+        try {
+            val c = core ?: return
+            c.currentCall?.pause()
+            _isOnHold.value = true
+            _isAddingCall.value = true
+        } catch (_: Exception) {}
     }
 
     fun cancelAddCall() {
-        _isAddingCall.value = false
-        core?.currentCall?.resume()
-        _isOnHold.value = false
+        try {
+            _isAddingCall.value = false
+            core?.currentCall?.resume()
+            _isOnHold.value = false
+        } catch (_: Exception) {}
     }
 
     fun mergeCallsToConference() {
-        val c = core ?: return
-        if (c.callsNb >= 2) {
-            val confParams = c.createConferenceParams(null)
-            confParams?.isAudioEnabled = true
-            val conf = c.createConferenceWithParams(confParams!!)
-            conf?.addParticipants(c.calls)
-            _isInConference.value = true
-            startLiveTimerIfNotRunning()
-        }
+        try {
+            val c = core ?: return
+            if (c.callsNb >= 2) {
+                val confParams = c.createConferenceParams(null)
+                if (confParams != null) {
+                    confParams.isAudioEnabled = true
+                    val conf = c.createConferenceWithParams(confParams)
+                    conf?.addParticipants(c.calls)
+                }
+                _isInConference.value = true
+                startLiveTimerIfNotRunning()
+            }
+        } catch (_: Exception) {}
     }
 
     fun transferCall(target: String) {
-        val c = core ?: return
-        val call = c.currentCall ?: return
-        val clean = target.trim().replace(" ", "")
-        if (clean.isEmpty()) return
-        val domain = c.defaultAccount?.params?.identityAddress?.domain ?: return
-        val destAddr = Factory.instance().createAddress("sip:$clean@$domain")
-        if (destAddr != null) {
-            call.transferTo(destAddr)
-        }
+        try {
+            val c = core ?: return
+            val call = c.currentCall ?: return
+            val clean = target.trim().replace(" ", "")
+            if (clean.isEmpty()) return
+            val domain = c.defaultAccount?.params?.identityAddress?.domain ?: return
+            val destAddr = Factory.instance().createAddress("sip:$clean@$domain")
+            if (destAddr != null) {
+                call.transferTo(destAddr)
+            }
+        } catch (_: Exception) {}
     }
 
     fun answerCall(withVideo: Boolean = _isVideoCall.value) {
-        val c = core ?: return
-        val call = c.currentCall ?: return
-        _isVideoCall.value = withVideo
-        acquireLongCallLocks()
-        autoRouteBestAudioDevice()
-        val params = c.createCallParams(call)
-        if (params != null) {
-            params.isAudioEnabled = true
-            params.isVideoEnabled = withVideo
-            call.acceptWithParams(params)
-        } else {
-            call.accept()
-        }
+        try {
+            val c = core ?: return
+            val call = c.currentCall ?: return
+            _isVideoCall.value = withVideo
+            acquireLongCallLocks()
+            autoRouteBestAudioDevice()
+            val params = c.createCallParams(call)
+            if (params != null) {
+                params.isAudioEnabled = true
+                params.isVideoEnabled = withVideo
+                call.acceptWithParams(params)
+            } else {
+                call.accept()
+            }
+        } catch (_: Exception) {}
     }
 
     fun hangup() {
-        val c = core ?: return
-        releaseLongCallLocks()
-        if (c.callsNb > 0) {
-            c.terminateAllCalls()
-        } else {
-            stopLiveTimerAndGetFormatted()
-        }
-        _callState.value = "Idle"
-        _isVideoCall.value = false
-        _isAddingCall.value = false
-        _isInConference.value = false
+        try {
+            val c = core ?: return
+            releaseLongCallLocks()
+            if (c.callsNb > 0) {
+                c.terminateAllCalls()
+            } else {
+                stopLiveTimerAndGetFormatted()
+            }
+            _callState.value = "Idle"
+            _isVideoCall.value = false
+            _isAddingCall.value = false
+            _isInConference.value = false
+        } catch (_: Exception) {}
     }
 
     fun toggleMute() {
-        val c = core ?: return
-        val next = !_isMuted.value
-        c.isMicEnabled = !next
-        _isMuted.value = next
+        try {
+            val c = core ?: return
+            val next = !_isMuted.value
+            c.isMicEnabled = !next
+            _isMuted.value = next
+        } catch (_: Exception) {}
     }
 
     fun toggleHold() {
-        val call = core?.currentCall ?: return
-        if (_isOnHold.value) {
-            call.resume()
-            _isOnHold.value = false
-        } else {
-            call.pause()
-            _isOnHold.value = true
-        }
+        try {
+            val call = core?.currentCall ?: return
+            if (_isOnHold.value) {
+                call.resume()
+                _isOnHold.value = false
+            } else {
+                call.pause()
+                _isOnHold.value = true
+            }
+        } catch (_: Exception) {}
     }
 
     fun toggleSpeaker() {
@@ -1209,134 +1257,148 @@ object SipManager {
     }
 
     fun sendDtmf(digit: Char) {
-        core?.currentCall?.sendDtmf(digit)
+        try { core?.currentCall?.sendDtmf(digit) } catch (_: Exception) {}
     }
 
     fun toggleRecord() {
-        val call = core?.currentCall ?: return
-        val ctx = appContext ?: return
-        if (!_isRecording.value) {
-            val dir = File(ctx.getExternalFilesDir(null), "Recordings")
-            if (!dir.exists()) dir.mkdirs()
-            val file = File(dir, "call_${System.currentTimeMillis()}.wav")
-            call.params.recordFile = file.absolutePath
-            call.startRecording()
-            _isRecording.value = true
-        } else {
-            call.stopRecording()
-            _isRecording.value = false
-        }
+        try {
+            val call = core?.currentCall ?: return
+            val ctx = appContext ?: return
+            if (!_isRecording.value) {
+                val dir = File(ctx.getExternalFilesDir(null), "Recordings")
+                if (!dir.exists()) dir.mkdirs()
+                val file = File(dir, "call_${System.currentTimeMillis()}.wav")
+                call.params.recordFile = file.absolutePath
+                call.startRecording()
+                _isRecording.value = true
+            } else {
+                call.stopRecording()
+                _isRecording.value = false
+            }
+        } catch (_: Exception) {}
     }
 
     private fun saveMessage(peer: String, body: String, isOutgoing: Boolean, channel: String) {
-        val time = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date())
-        val item = ChatMessageItem(UUID.randomUUID().toString(), peer, body, isOutgoing, channel, time)
-        val updated = listOf(item) + _messages.value.take(100)
-        _messages.value = updated
+        try {
+            val time = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date())
+            val item = ChatMessageItem(UUID.randomUUID().toString(), peer, body, isOutgoing, channel, time)
+            val updated = listOf(item) + _messages.value.take(100)
+            _messages.value = updated
 
-        val arr = JSONArray()
-        updated.forEach { m ->
-            val o = JSONObject()
-            o.put("id", m.id)
-            o.put("peer", m.peer)
-            o.put("body", m.body)
-            o.put("out", m.isOutgoing)
-            o.put("ch", m.channel)
-            o.put("time", m.time)
-            arr.put(o)
-        }
-        appContext?.getSharedPreferences("sip_msgs", Context.MODE_PRIVATE)
-            ?.edit()?.putString("msgs_json", arr.toString())?.apply()
+            val arr = JSONArray()
+            updated.forEach { m ->
+                val o = JSONObject()
+                o.put("id", m.id)
+                o.put("peer", m.peer)
+                o.put("body", m.body)
+                o.put("out", m.isOutgoing)
+                o.put("ch", m.channel)
+                o.put("time", m.time)
+                arr.put(o)
+            }
+            appContext?.getSharedPreferences("sip_msgs", Context.MODE_PRIVATE)
+                ?.edit()?.putString("msgs_json", arr.toString())?.apply()
+        } catch (_: Exception) {}
     }
 
     private fun loadMessages() {
-        val raw = appContext?.getSharedPreferences("sip_msgs", Context.MODE_PRIVATE)?.getString("msgs_json", "") ?: ""
-        if (raw.isNotEmpty()) {
-            val arr = JSONArray(raw)
-            val list = mutableListOf<ChatMessageItem>()
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                list.add(
-                    ChatMessageItem(
-                        id = o.getString("id"),
-                        peer = o.getString("peer"),
-                        body = o.getString("body"),
-                        isOutgoing = o.getBoolean("out"),
-                        channel = o.optString("ch", "SIP"),
-                        time = o.getString("time")
+        try {
+            val raw = appContext?.getSharedPreferences("sip_msgs", Context.MODE_PRIVATE)?.getString("msgs_json", "") ?: ""
+            if (raw.isNotEmpty()) {
+                val arr = JSONArray(raw)
+                val list = mutableListOf<ChatMessageItem>()
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    list.add(
+                        ChatMessageItem(
+                            id = o.getString("id"),
+                            peer = o.getString("peer"),
+                            body = o.getString("body"),
+                            isOutgoing = o.getBoolean("out"),
+                            channel = o.optString("ch", "SIP"),
+                            time = o.getString("time")
+                        )
                     )
-                )
+                }
+                _messages.value = list
             }
-            _messages.value = list
-        }
+        } catch (_: Exception) {}
     }
 
     private fun persistAccounts() {
-        val arr = JSONArray()
-        _accounts.value.forEach { acc ->
-            val obj = JSONObject()
-            obj.put("id", acc.id)
-            obj.put("label", acc.label)
-            obj.put("server", acc.server)
-            obj.put("username", acc.username)
-            obj.put("password", acc.password)
-            obj.put("transport", acc.transport)
-            arr.put(obj)
-        }
-        appContext?.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
-            ?.edit()?.putString("accounts_json", arr.toString())?.apply()
+        try {
+            val arr = JSONArray()
+            _accounts.value.forEach { acc ->
+                val obj = JSONObject()
+                obj.put("id", acc.id)
+                obj.put("label", acc.label)
+                obj.put("server", acc.server)
+                obj.put("username", acc.username)
+                obj.put("password", acc.password)
+                obj.put("transport", acc.transport)
+                arr.put(obj)
+            }
+            appContext?.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)
+                ?.edit()?.putString("accounts_json", arr.toString())?.apply()
+        } catch (_: Exception) {}
     }
 
     private fun loadAccounts() {
-        val prefs = appContext?.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE) ?: return
-        val activeId = prefs.getString("active_id", "") ?: ""
-        _activeAccountId.value = activeId
+        try {
+            val prefs = appContext?.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE) ?: return
+            val activeId = prefs.getString("active_id", "") ?: ""
+            _activeAccountId.value = activeId
 
-        val jsonStr = prefs.getString("accounts_json", "") ?: ""
-        if (jsonStr.isNotEmpty()) {
-            val arr = JSONArray(jsonStr)
-            val list = mutableListOf<SipAccountItem>()
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                list.add(
-                    SipAccountItem(
-                        id = o.getString("id"),
-                        label = o.optString("label", o.getString("username")),
-                        server = o.getString("server"),
-                        username = o.getString("username"),
-                        password = o.getString("password"),
-                        transport = o.optString("transport", "UDP")
+            val jsonStr = prefs.getString("accounts_json", "") ?: ""
+            if (jsonStr.isNotEmpty()) {
+                val arr = JSONArray(jsonStr)
+                val list = mutableListOf<SipAccountItem>()
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    list.add(
+                        SipAccountItem(
+                            id = o.getString("id"),
+                            label = o.optString("label", o.getString("username")),
+                            server = o.getString("server"),
+                            username = o.getString("username"),
+                            password = o.getString("password"),
+                            transport = o.optString("transport", "UDP")
+                        )
                     )
-                )
+                }
+                _accounts.value = list
             }
-            _accounts.value = list
-        }
+        } catch (_: Exception) {}
     }
 
     private fun addHistory(number: String, type: String, duration: String) {
-        val time = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date())
-        val current = _recentCalls.value.toMutableList()
-        current.add(0, CallHistoryItem(number, type, time, duration))
-        val trimmed = current.take(50)
-        _recentCalls.value = trimmed
+        try {
+            val time = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date())
+            val current = _recentCalls.value.toMutableList()
+            current.add(0, CallHistoryItem(number, type, time, duration))
+            val trimmed = current.take(50)
+            _recentCalls.value = trimmed
 
-        val prefs = appContext?.getSharedPreferences("sip_history", Context.MODE_PRIVATE) ?: return
-        val serialized = trimmed.joinToString("||") { "${it.number}::${it.type}::${it.time}::${it.duration}" }
-        prefs.edit().putString("logs", serialized).apply()
+            val prefs = appContext?.getSharedPreferences("sip_history", Context.MODE_PRIVATE) ?: return
+            val serialized = trimmed.joinToString("||") { "${it.number}::${it.type}::${it.time}::${it.duration}" }
+            prefs.edit().putString("logs", serialized).apply()
+        } catch (_: Exception) {}
     }
 
     private fun loadHistory() {
-        val prefs = appContext?.getSharedPreferences("sip_history", Context.MODE_PRIVATE) ?: return
-        val raw = prefs.getString("logs", "") ?: ""
-        if (raw.isNotEmpty()) {
-            _recentCalls.value = raw.split("||").mapNotNull {
-                val parts = it.split("::")
-                when {
-                    parts.size >= 4 -> CallHistoryItem(parts[0], parts[1], parts[2], parts[3])
-                    parts.size == 3 -> CallHistoryItem(parts[0], parts[1], parts[2], "00:00")
-                    else -> null
+        try {
+            val prefs = appContext?.getSharedPreferences("sip_history", Context.MODE_PRIVATE) ?: return
+            val raw = prefs.getString("logs", "") ?: ""
+            if (raw.isNotEmpty()) {
+                _recentCalls.value = raw.split("||").mapNotNull {
+                    val parts = it.split("::")
+                    when {
+                        parts.size >= 4 -> CallHistoryItem(parts[0], parts[1], parts[2], parts[3])
+                        parts.size == 3 -> CallHistoryItem(parts[0], parts[1], parts[2], "00:00")
+                        else -> null
+                    }
                 }
             }
-        }
+        } catch (_: Exception) {}
     }
 }

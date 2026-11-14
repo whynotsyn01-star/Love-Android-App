@@ -112,6 +112,11 @@ object SipManager {
     private val _activeAccountId = MutableStateFlow("")
     val activeAccountId: StateFlow<String> = _activeAccountId.asStateFlow()
 
+    // Exact jiPBX SIP VoIP Softphone Network Engine Defaults:
+    // 1. Use WiFi Only = false
+    // 2. Allow IPv6 = true
+    // 3. Use Random Ports = true
+    // 4. STUN/ICE = false (Critical for Teletalk SIM & 103.170.231.10 direct CGNAT routing!)
     private val _useWifiOnly = MutableStateFlow(false)
     val useWifiOnly: StateFlow<Boolean> = _useWifiOnly.asStateFlow()
 
@@ -121,7 +126,7 @@ object SipManager {
     private val _useRandomPort = MutableStateFlow(true)
     val useRandomPort: StateFlow<Boolean> = _useRandomPort.asStateFlow()
 
-    private val _enableStunIce = MutableStateFlow(true)
+    private val _enableStunIce = MutableStateFlow(false)
     val enableStunIce: StateFlow<Boolean> = _enableStunIce.asStateFlow()
 
     private val _enableRportSymmetric = MutableStateFlow(true)
@@ -133,10 +138,10 @@ object SipManager {
     private val _autoAnswerEnabled = MutableStateFlow(false)
     val autoAnswerEnabled: StateFlow<Boolean> = _autoAnswerEnabled.asStateFlow()
 
-    private val _stunServer = MutableStateFlow("stun.l.google.com:19302")
+    private val _stunServer = MutableStateFlow("")
     val stunServer: StateFlow<String> = _stunServer.asStateFlow()
 
-    private val _keepAliveSec = MutableStateFlow(10)
+    private val _keepAliveSec = MutableStateFlow(15)
     val keepAliveSec: StateFlow<Int> = _keepAliveSec.asStateFlow()
 
     private var currentSessionNumber: String = ""
@@ -198,10 +203,10 @@ object SipManager {
                 }
                 RegistrationState.Failed -> {
                     _regState.value = "Failed: $message"
-                    if (_useRandomPort.value && portRetryCount < 3) {
+                    if (_useRandomPort.value && portRetryCount < 4) {
                         portRetryCount++
                         managerScope.launch {
-                            delay(1200L)
+                            delay(1000L)
                             rotateDynamicUdpPortAndRefresh()
                         }
                     }
@@ -329,6 +334,7 @@ object SipManager {
         factory.setDebugMode(false, "LoveSIP")
         val c = factory.createCore(null, null, appContext!!)
 
+        // jiPBX style network & SIP stack tuning
         applyNetworkPolicies(c)
 
         c.isEchoCancellationEnabled = true
@@ -337,9 +343,10 @@ object SipManager {
         c.config.setInt("rtp", "video_jitt_comp", 80)
         c.config.setBool("sound", "ec_state", true)
 
-        // Enable all audio codecs safely without reassigning read-only val property
+        // Enable standard clean codecs (keeps UDP SIP INVITE packet compact under 1300 bytes so SIM network never drops it)
+        val coreCodecs = setOf("PCMU", "PCMA", "G722", "opus", "GSM", "telephone-event")
         c.audioPayloadTypes.forEach { pt ->
-            pt.enable(true)
+            pt.enable(coreCodecs.any { it.equals(pt.mimeType, ignoreCase = true) })
         }
         refreshCodecList(c)
 
@@ -371,12 +378,11 @@ object SipManager {
         val c = core ?: return
         if (!_useRandomPort.value || c.callsNb > 0) return
         val transports = c.transports
-        transports.udpPort = if (portRetryCount % 2 == 1) Random.nextInt(10000, 65000) else -1
+        // Pick a fresh random ephemeral/registered UDP port (10240-65000) or OS auto (-1)
+        transports.udpPort = if (portRetryCount % 2 == 1) Random.nextInt(10240, 65000) else -1
         transports.tcpPort = -1
         transports.tlsPort = -1
         c.transports = transports
-        c.config.setInt("rtp", "audio_rtp_port", -1)
-        c.config.setInt("rtp", "video_rtp_port", -1)
         c.refreshRegisters()
     }
 
@@ -391,7 +397,16 @@ object SipManager {
         cm.registerNetworkCallback(req, object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 managerScope.launch {
-                    delay(700L)
+                    delay(500L)
+                    if (core?.callsNb == 0) {
+                        forceNetworkRebind()
+                    }
+                }
+            }
+
+            override fun onLost(network: Network) {
+                managerScope.launch {
+                    delay(600L)
                     if (core?.callsNb == 0) {
                         forceNetworkRebind()
                     }
@@ -425,12 +440,6 @@ object SipManager {
                 _regState.value = "WiFi Only Mode"
                 return
             }
-        }
-
-        if (_regState.value == "Online" && c.accountList.isNotEmpty()) {
-            c.isNetworkReachable = true
-            c.refreshRegisters()
-            return
         }
 
         applyNetworkPolicies(c)
@@ -488,12 +497,15 @@ object SipManager {
         _isVideoCall.value = nextState
     }
 
+    // jiPBX SIP VoIP Softphone Network Stack Implementation
     fun applyNetworkPolicies(targetCore: Core? = core) {
         val c = targetCore ?: return
 
+        // 1. Allow IPv6 (Dual-stack IPv4 + IPv6 for Teletalk SIM)
         c.isIpv6Enabled = _allowIpv6.value
         c.config.setBool("net", "allow_ipv6", _allowIpv6.value)
 
+        // 2. Use Random Ports (-1 binds random Ephemeral/Registered port automatically)
         val transports = c.transports
         if (_useRandomPort.value) {
             transports.udpPort = -1
@@ -505,22 +517,33 @@ object SipManager {
             transports.udpPort = 5060
             transports.tcpPort = 5060
             transports.tlsPort = 5061
-            c.config.setInt("rtp", "audio_rtp_port", 10000)
-            c.config.setInt("rtp", "video_rtp_port", 20000)
+            c.config.setInt("rtp", "audio_rtp_port", 7078)
+            c.config.setInt("rtp", "video_rtp_port", 9078)
         }
         c.transports = transports
 
+        // 3. jiPBX CGNAT Bypass: Contact Rewrite + Rport + Symmetric RTP + No MTU Fragmentation
         c.config.setBool("rtp", "symmetric", _enableRportSymmetric.value)
-        c.config.setBool("sip", "rport", _enableRportSymmetric.value)
-        c.config.setBool("sip", "use_rport", _enableRportSymmetric.value)
+        c.config.setBool("sip", "rport", true)
+        c.config.setBool("sip", "use_rport", true)
+        c.config.setBool("sip", "contact_omal", true)
+        c.config.setInt("net", "mtu", 1300) // Prevents UDP fragmentation drop on Teletalk SIM
 
+        // 4. Keep-Alive to hold Teletalk NAT pinhole open
         c.isKeepAliveEnabled = true
         c.config.setInt("sip", "keep_alive_period", _keepAliveSec.value * 1000)
 
+        // 5. NAT Policy (Direct routing by default like jiPBX; STUN/ICE only if explicitly enabled)
         val natPolicy = c.createNatPolicy()
-        natPolicy.stunServer = _stunServer.value.trim().ifEmpty { "stun.l.google.com:19302" }
-        natPolicy.isStunEnabled = _enableStunIce.value
-        natPolicy.isIceEnabled = _enableStunIce.value
+        if (_enableStunIce.value && _stunServer.value.isNotBlank()) {
+            natPolicy.stunServer = _stunServer.value.trim()
+            natPolicy.isStunEnabled = true
+            natPolicy.isIceEnabled = true
+        } else {
+            natPolicy.isStunEnabled = false
+            natPolicy.isIceEnabled = false
+            natPolicy.isTurnEnabled = false
+        }
         c.natPolicy = natPolicy
     }
 
@@ -560,7 +583,7 @@ object SipManager {
             ?.putBoolean("wifi_only", wifiOnly)
             ?.putBoolean("allow_ipv6", ipv6)
             ?.putBoolean("random_port", randomPort)
-            ?.putBoolean("stun_ice", stunIce)
+            ?.putBoolean("stun_ice_v2", stunIce)
             ?.putBoolean("rport_sym", rportSym)
             ?.putBoolean("dnd", dnd)
             ?.putBoolean("auto_ans", autoAns)
@@ -583,12 +606,13 @@ object SipManager {
         _useWifiOnly.value = p.getBoolean("wifi_only", false)
         _allowIpv6.value = p.getBoolean("allow_ipv6", true)
         _useRandomPort.value = p.getBoolean("random_port", true)
-        _enableStunIce.value = p.getBoolean("stun_ice", true)
+        // Default FALSE like jiPBX so Teletalk SIM works out of the box!
+        _enableStunIce.value = p.getBoolean("stun_ice_v2", false)
         _enableRportSymmetric.value = p.getBoolean("rport_sym", true)
         _dndEnabled.value = p.getBoolean("dnd", false)
         _autoAnswerEnabled.value = p.getBoolean("auto_ans", false)
         _stunServer.value = p.getString("stun_server", "stun.l.google.com:19302") ?: "stun.l.google.com:19302"
-        _keepAliveSec.value = p.getInt("keep_alive", 10)
+        _keepAliveSec.value = p.getInt("keep_alive", 15)
     }
 
     fun iterate() {
@@ -648,6 +672,7 @@ object SipManager {
         }
     }
 
+    // jiPBX Account Registration with Contact/IP Rewrite for Mobile CGNAT
     fun register(server: String, user: String, pass: String, transportMode: String) {
         val c = core ?: return
         portRetryCount = 0
@@ -660,7 +685,7 @@ object SipManager {
         if (cleanServer.isEmpty() || cleanUser.isEmpty()) return
 
         val hostOnly = cleanServer.substringBefore(":")
-        val authInfo = Factory.instance().createAuthInfo(cleanUser, null, pass, null, null, hostOnly, null)
+        val authInfo = Factory.instance().createAuthInfo(cleanUser, cleanUser, pass, null, null, hostOnly, null)
         c.addAuthInfo(authInfo)
 
         val accountParams = c.createAccountParams()
@@ -673,7 +698,12 @@ object SipManager {
             accountParams.serverAddress = serverAddr
             accountParams.isRegisterEnabled = true
             accountParams.isOutboundProxyEnabled = true
+            // jiPBX-style NAT Contact Rewrite: automatically updates local SIM IP/port to public CGNAT IP/port
+            accountParams.allowContactRewrite = true
+            accountParams.contactParameters = null
+            accountParams.expires = 300
             accountParams.natPolicy = c.natPolicy
+
             val account = c.createAccount(accountParams)
             c.addAccount(account)
             c.defaultAccount = account
@@ -684,6 +714,9 @@ object SipManager {
         val c = core ?: return
         val cleanNumber = target.trim().replace(" ", "")
         if (cleanNumber.isEmpty()) return
+
+        // Ensure network is marked reachable before dialing on SIM data
+        c.isNetworkReachable = true
 
         if (c.callsNb > 0) {
             currentSessionNumber = "$currentSessionNumber & $cleanNumber"
@@ -711,6 +744,7 @@ object SipManager {
             val params = c.createCallParams(null)
             params?.isAudioEnabled = true
             params?.isVideoEnabled = isVideo
+            params?.mediaEncryption = MediaEncryption.None
             _isVideoCall.value = isVideo
             c.inviteAddressWithParams(address, params!!)
         }

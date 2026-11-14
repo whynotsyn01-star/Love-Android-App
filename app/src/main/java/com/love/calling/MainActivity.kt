@@ -763,14 +763,14 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(24.dp),
+                .padding(horizontal = 20.dp, vertical = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 20.dp)) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 16.dp)) {
                 Text(
                     if (isInConference) "3-Way Conference" else remoteNumber,
-                    fontSize = 26.sp,
+                    fontSize = 30.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White,
                     textAlign = TextAlign.Center
@@ -784,20 +784,20 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
                     else -> callState
                 }
 
-                Text(statusSubtext, fontSize = 15.sp, color = Color.LightGray)
+                Text(statusSubtext, fontSize = 17.sp, fontWeight = FontWeight.Medium, color = Color.LightGray)
 
-                if (durationSec > 0L || callState == "Connected" || isInConference) {
-                    Spacer(Modifier.height(8.dp))
+                if (durationSec > 0L || isInConference) {
+                    Spacer(Modifier.height(10.dp))
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
+                            .clip(RoundedCornerShape(22.dp))
                             .background(Color(0xFF2ECC71).copy(alpha = 0.22f))
-                            .border(1.dp, Color(0xFF2ECC71).copy(alpha = 0.6f), RoundedCornerShape(20.dp))
-                            .padding(horizontal = 18.dp, vertical = 6.dp)
+                            .border(1.dp, Color(0xFF2ECC71).copy(alpha = 0.6f), RoundedCornerShape(22.dp))
+                            .padding(horizontal = 20.dp, vertical = 6.dp)
                     ) {
                         Text(
                             text = liveTimer,
-                            fontSize = 24.sp,
+                            fontSize = 26.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = Color(0xFF2ECC71),
                             letterSpacing = 1.5.sp
@@ -808,28 +808,32 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
 
             if (showDtmf) {
                 val dtmfKeys = listOf(listOf('1', '2', '3'), listOf('4', '5', '6'), listOf('7', '8', '9'), listOf('*', '0', '#'))
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     dtmfKeys.forEach { row ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                             row.forEach { ch ->
                                 Button(
                                     onClick = { SipManager.sendDtmf(ch) },
-                                    modifier = Modifier.size(64.dp),
+                                    modifier = Modifier.size(72.dp),
                                     shape = CircleShape
-                                ) { Text(ch.toString(), fontSize = 22.sp) }
+                                ) { Text(ch.toString(), fontSize = 24.sp, fontWeight = FontWeight.Bold) }
                             }
                         }
                     }
-                    TextButton(onClick = { showDtmf = false }) { Text("Hide Keypad", color = Color.White) }
+                    TextButton(onClick = { showDtmf = false }) { Text("Hide Keypad", color = Color.White, fontSize = 15.sp) }
                 }
             } else {
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                // Standard Medium-Large In-Call Action Grid
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
                         CallActionBtn("Mute", Icons.Default.MicOff, isMuted) { SipManager.toggleMute() }
                         CallActionBtn("Keypad", Icons.Default.Dialpad, showDtmf) { showDtmf = !showDtmf }
                         CallActionBtn("Speaker", Icons.Default.VolumeUp, isSpeaker) { SipManager.toggleSpeaker() }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
                         CallActionBtn("Hold", Icons.Default.Pause, isOnHold) { SipManager.toggleHold() }
                         CallActionBtn("Record", Icons.Default.FiberManualRecord, isRecording) { SipManager.toggleRecord() }
                         if (activeCallsCount >= 2 && !isInConference) {
@@ -838,7 +842,7 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
                             CallActionBtn("Add Call", Icons.Default.PersonAdd, false) { SipManager.prepareAddCall() }
                         }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(20.dp), modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(28.dp), modifier = Modifier.align(Alignment.CenterHorizontally)) {
                         CallActionBtn("Video", Icons.Default.Videocam, isVideoCall) { SipManager.toggleVideoDuringCall() }
                         if (isVideoCall) {
                             CallActionBtn("Flip Cam", Icons.Default.Cameraswitch, false) { SipManager.switchCamera() }
@@ -849,57 +853,58 @@ fun ActiveCallScreen(callState: String, remoteNumber: String) {
             }
 
             if (callState == "Incoming") {
-                Row(horizontalArrangement = Arrangement.spacedBy(32.dp), modifier = Modifier.padding(bottom = 24.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(36.dp), modifier = Modifier.padding(bottom = 24.dp)) {
                     Box(
-                        Modifier.size(70.dp).clip(CircleShape).background(Color(0xFFE74C3C)).clickable { SipManager.hangup() },
+                        Modifier.size(78.dp).clip(CircleShape).background(Color(0xFFE74C3C)).clickable { SipManager.hangup() },
                         contentAlignment = Alignment.Center
-                    ) { Icon(Icons.Default.CallEnd, "Decline", tint = Color.White, modifier = Modifier.size(30.dp)) }
+                    ) { Icon(Icons.Default.CallEnd, "Decline", tint = Color.White, modifier = Modifier.size(36.dp)) }
 
                     Box(
-                        Modifier.size(70.dp).clip(CircleShape).background(Color(0xFF2ECC71)).clickable { SipManager.answerCall(withVideo = false) },
+                        Modifier.size(78.dp).clip(CircleShape).background(Color(0xFF2ECC71)).clickable { SipManager.answerCall(withVideo = false) },
                         contentAlignment = Alignment.Center
-                    ) { Icon(Icons.Default.Call, "Audio Answer", tint = Color.White, modifier = Modifier.size(30.dp)) }
+                    ) { Icon(Icons.Default.Call, "Audio Answer", tint = Color.White, modifier = Modifier.size(36.dp)) }
 
                     if (isVideoCall) {
                         Box(
-                            Modifier.size(70.dp).clip(CircleShape).background(AccentPrimary).clickable { SipManager.answerCall(withVideo = true) },
+                            Modifier.size(78.dp).clip(CircleShape).background(AccentPrimary).clickable { SipManager.answerCall(withVideo = true) },
                             contentAlignment = Alignment.Center
-                        ) { Icon(Icons.Default.Videocam, "Video Answer", tint = Color.Black, modifier = Modifier.size(30.dp)) }
+                        ) { Icon(Icons.Default.Videocam, "Video Answer", tint = Color.Black, modifier = Modifier.size(36.dp)) }
                     }
                 }
             } else {
                 Box(
                     modifier = Modifier
                         .padding(bottom = 24.dp)
-                        .size(74.dp)
+                        .size(82.dp)
                         .clip(CircleShape)
                         .background(Color(0xFFE74C3C))
                         .clickable { SipManager.hangup() },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.CallEnd, contentDescription = "End Call", tint = Color.White, modifier = Modifier.size(34.dp))
+                    Icon(Icons.Default.CallEnd, contentDescription = "End Call", tint = Color.White, modifier = Modifier.size(38.dp))
                 }
             }
         }
     }
 }
 
+// Standard Medium-Large Button (76.dp circle + 32.dp icon + 13.sp label)
 @Composable
 fun CallActionBtn(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, active: Boolean, onClick: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             modifier = Modifier
-                .size(62.dp)
+                .size(76.dp)
                 .clip(CircleShape)
-                .background(if (active) AccentRose else GlassCardColor)
-                .border(1.dp, GlassBorderColor, CircleShape)
+                .background(if (active) AccentRose else DialButtonBrush)
+                .border(1.3.dp, if (active) AccentRose else GlassBorderColor, CircleShape)
                 .clickable { onClick() },
             contentAlignment = Alignment.Center
         ) {
-            Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(25.dp))
+            Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(32.dp))
         }
-        Spacer(Modifier.height(5.dp))
-        Text(label, color = Color.LightGray, fontSize = 11.sp)
+        Spacer(Modifier.height(7.dp))
+        Text(label, color = Color.White.copy(alpha = 0.9f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -957,7 +962,6 @@ fun MultiAccountScreen() {
                                 )
                             }
                         }
-                        // এখানে আর :5060 দেখাবে না
                         Text("${acc.username}@${acc.server} (${acc.transport})", fontSize = 13.sp, color = Color.LightGray)
                     }
 
@@ -1032,7 +1036,6 @@ fun MultiAccountScreen() {
             singleLine = true
         )
 
-        // Server Port বক্সটি সম্পূর্ণ সরিয়ে তার জায়গায় সরাসরি Use random ports (On/Off) দেওয়া হয়েছে
         SettingToggleCard(
             title = "Use random ports (Auto-Detect UDP)",
             subtitle = "Auto-detects working UDP port (1024–65535) for Teletalk SIM & Wi-Fi",
@@ -1133,7 +1136,7 @@ fun AdvancedNetworkSettingsScreen() {
 
         SettingToggleCard(
             title = "STUN & ICE NAT Traversal",
-            subtitle = "Fixes one-way audio and connects calls across random mobile IPs",
+            subtitle = "Keep OFF for direct Teletalk SIM routing (like jiPBX); turn ON only if required by a custom PBX",
             checked = enableStunIce,
             onCheckedChange = { enableStunIce = it }
         )

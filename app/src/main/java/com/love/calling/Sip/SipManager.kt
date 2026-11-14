@@ -5,7 +5,9 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.PowerManager
 import android.telephony.SmsManager
 import android.view.TextureView
 import kotlinx.coroutines.*
@@ -56,6 +58,11 @@ object SipManager {
     private var appContext: Context? = null
     private var networkCallbackRegistered = false
     private var portRetryCount = 0
+
+    // Long Call Stability Locks + Ear Proximity Sensor Lock (Screen Off near ear, Screen On away)
+    private var callWakeLock: PowerManager.WakeLock? = null
+    private var proximityWakeLock: PowerManager.WakeLock? = null
+    private var wifiHighPerfLock: WifiManager.WifiLock? = null
 
     private val managerScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var timerJob: Job? = null
@@ -112,11 +119,6 @@ object SipManager {
     private val _activeAccountId = MutableStateFlow("")
     val activeAccountId: StateFlow<String> = _activeAccountId.asStateFlow()
 
-    // Exact jiPBX SIP VoIP Softphone Network Engine Defaults:
-    // 1. Use WiFi Only = false
-    // 2. Allow IPv6 = true
-    // 3. Use Random Ports = true
-    // 4. STUN/ICE = false (Critical for Teletalk SIM & 103.170.231.10 direct CGNAT routing!)
     private val _useWifiOnly = MutableStateFlow(false)
     val useWifiOnly: StateFlow<Boolean> = _useWifiOnly.asStateFlow()
 
@@ -141,12 +143,80 @@ object SipManager {
     private val _stunServer = MutableStateFlow("")
     val stunServer: StateFlow<String> = _stunServer.asStateFlow()
 
-    private val _keepAliveSec = MutableStateFlow(15)
+    private val _keepAliveSec = MutableStateFlow(10)
     val keepAliveSec: StateFlow<Int> = _keepAliveSec.asStateFlow()
 
     private var currentSessionNumber: String = ""
     private var currentSessionDir: String = "Outgoing"
     private var wasAnswered = false
+
+    private fun acquireLongCallLocks() {
+        try {
+            val ctx = appContext ?: return
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (callWakeLock == null) {
+                callWakeLock = pm?.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "LoveSIP::LongCallCpuWakeLock"
+                )?.apply { setReferenceCounted(false) }
+            }
+            if (callWakeLock?.isHeld == false) {
+                callWakeLock?.acquire(3 * 60 * 60 * 1000L)
+            }
+
+            if (wifiHighPerfLock == null) {
+                val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiHighPerfLock = wm?.createWifiLock(lockMode, "LoveSIP::LowLatencyCallLock")?.apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wifiHighPerfLock?.isHeld == false) {
+                wifiHighPerfLock?.acquire()
+            }
+
+            updateProximitySensorLock()
+        } catch (_: Exception) {}
+    }
+
+    // কানে ধরলে স্ক্রিন অফ এবং কান থেকে সরালে স্ক্রিন অন করার সেন্সর কন্ট্রোল
+    private fun updateProximitySensorLock() {
+        try {
+            val ctx = appContext ?: return
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+
+            if (proximityWakeLock == null && pm.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
+                proximityWakeLock = pm.newWakeLock(
+                    PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK,
+                    "LoveSIP::ProximityScreenOffLock"
+                ).apply { setReferenceCounted(false) }
+            }
+
+            val inActiveVoiceCall = (core?.callsNb ?: 0) > 0 && !_isVideoCall.value && !_isSpeaker.value
+            if (inActiveVoiceCall) {
+                if (proximityWakeLock?.isHeld == false) {
+                    proximityWakeLock?.acquire(3 * 60 * 60 * 1000L)
+                }
+            } else {
+                if (proximityWakeLock?.isHeld == true) {
+                    proximityWakeLock?.release()
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun releaseLongCallLocks() {
+        try {
+            if (proximityWakeLock?.isHeld == true) proximityWakeLock?.release()
+            if (callWakeLock?.isHeld == true) callWakeLock?.release()
+            if (wifiHighPerfLock?.isHeld == true) wifiHighPerfLock?.release()
+        } catch (_: Exception) {}
+    }
 
     fun formatDuration(totalSec: Long): String {
         val hrs = totalSec / 3600
@@ -162,13 +232,17 @@ object SipManager {
     private fun startLiveTimerIfNotRunning() {
         if (callStartTimeMs == 0L) {
             callStartTimeMs = System.currentTimeMillis()
+            _callDurationSec.value = 1L
         }
         if (timerJob?.isActive == true) return
         timerJob = managerScope.launch {
             while (isActive) {
-                val elapsed = (System.currentTimeMillis() - callStartTimeMs) / 1000L
-                _callDurationSec.value = elapsed.coerceAtLeast(0L)
-                delay(500L)
+                val elapsed = ((System.currentTimeMillis() - callStartTimeMs) / 1000L).coerceAtLeast(1L)
+                _callDurationSec.value = elapsed
+                if (elapsed % 25L == 0L) {
+                    core?.refreshRegisters()
+                }
+                delay(1000L)
             }
         }
     }
@@ -248,13 +322,28 @@ object SipManager {
             }
 
             when (state) {
-                Call.State.OutgoingInit, Call.State.OutgoingProgress, Call.State.OutgoingRinging, Call.State.OutgoingEarlyMedia -> {
+                // ১. প্রথমে কল দেওয়ার সাথে সাথে "Calling..." উঠবে
+                Call.State.OutgoingInit, Call.State.OutgoingProgress -> {
+                    acquireLongCallLocks()
                     if (core.callsNb <= 1) {
                         wasAnswered = false
+                        timerJob?.cancel()
+                        timerJob = null
+                        callStartTimeMs = 0L
+                        _callDurationSec.value = 0L
                         currentSessionNumber = number
                         currentSessionDir = if (hasVideo) "Video Outgoing" else "Outgoing"
                     }
                     _callState.value = "Calling..."
+                    _isAddingCall.value = false
+                }
+                // ২. অপর পাশে কল ঢুকলে (রিং হলে) সাথে সাথে "Ringing..." উঠবে
+                Call.State.OutgoingRinging, Call.State.OutgoingEarlyMedia -> {
+                    acquireLongCallLocks()
+                    if (core.callsNb <= 1 && !wasAnswered) {
+                        _callDurationSec.value = 0L
+                    }
+                    _callState.value = "Ringing..."
                     _isAddingCall.value = false
                 }
                 Call.State.IncomingReceived, Call.State.IncomingEarlyMedia -> {
@@ -263,8 +352,13 @@ object SipManager {
                         addHistory(number, "Missed (DND)", "00:00")
                         return
                     }
+                    acquireLongCallLocks()
                     if (core.callsNb <= 1) {
                         wasAnswered = false
+                        timerJob?.cancel()
+                        timerJob = null
+                        callStartTimeMs = 0L
+                        _callDurationSec.value = 0L
                         currentSessionNumber = number
                         currentSessionDir = if (hasVideo) "Video Incoming" else "Incoming"
                     }
@@ -274,14 +368,16 @@ object SipManager {
                         answerCall(withVideo = hasVideo)
                     }
                 }
+                // ৩. অপর পাশ থেকে কল ধরার সাথে সাথেই Live Timer (00:01, 00:02...) শুরু হবে
                 Call.State.Connected, Call.State.StreamsRunning -> {
                     wasAnswered = true
-                    _callState.value = "Connected"
+                    _callState.value = "Active"
                     _isOnHold.value = false
                     _isAddingCall.value = false
                     if (hasVideo && !_isSpeaker.value) {
                         toggleSpeaker()
                     }
+                    acquireLongCallLocks()
                     startLiveTimerIfNotRunning()
                 }
                 Call.State.Paused, Call.State.PausedByRemote -> {
@@ -293,7 +389,14 @@ object SipManager {
                 Call.State.End, Call.State.Released, Call.State.Error -> {
                     _activeCallsCount.value = core.callsNb
                     if (core.callsNb == 0) {
-                        val totalDurationStr = stopLiveTimerAndGetFormatted()
+                        releaseLongCallLocks()
+                        val totalDurationStr = if (wasAnswered) stopLiveTimerAndGetFormatted() else {
+                            timerJob?.cancel()
+                            timerJob = null
+                            callStartTimeMs = 0L
+                            _callDurationSec.value = 0L
+                            "00:00"
+                        }
                         val logType = if (!wasAnswered && currentSessionDir.contains("Incoming")) {
                             "Missed"
                         } else if (inConf) {
@@ -313,8 +416,9 @@ object SipManager {
                         _isInConference.value = false
                         _isAddingCall.value = false
                     } else {
-                        _callState.value = "Connected"
+                        _callState.value = "Active"
                         core.currentCall?.resume()
+                        updateProximitySensorLock()
                     }
                 }
                 else -> {}
@@ -336,15 +440,34 @@ object SipManager {
 
         applyNetworkPolicies(c)
 
+        // === ULTRA HD AUDIO + 1 HOUR+ MARATHON CALL STABILITY TUNING ===
         c.isEchoCancellationEnabled = true
-        c.isAdaptiveRateControlEnabled = true
-        c.config.setInt("rtp", "audio_jitt_comp", 60)
-        c.config.setInt("rtp", "video_jitt_comp", 80)
+        c.micGainDb = 2.0f
+        c.playbackGainDb = 2.5f
         c.config.setBool("sound", "ec_state", true)
+        c.config.setBool("sound", "noisegate", true)
+        c.config.setBool("sound", "agc", true)
 
-        val coreCodecs = setOf("PCMU", "PCMA", "G722", "opus", "GSM", "telephone-event")
+        c.isAdaptiveRateControlEnabled = true
+        c.config.setInt("rtp", "audio_jitt_comp", 40)
+        c.config.setInt("rtp", "video_jitt_comp", 60)
+        c.config.setBool("rtp", "audio_adaptive_jitt_comp_enabled", true)
+        c.config.setInt("rtp", "nortp_timeout", 3600)
+        c.config.setInt("sip", "ptime", 20)
+        c.config.setInt("sip", "inc_timeout", 60)
+        c.config.setInt("sip", "in_call_timeout", 0)
+
+        c.audioDscp = 0x2E
+        c.videoDscp = 0x28
+        c.sipDscp = 0x1A
+
+        val coreCodecs = setOf("opus", "G722", "PCMU", "PCMA", "GSM", "telephone-event")
         c.audioPayloadTypes.forEach { pt ->
-            pt.enable(coreCodecs.any { it.equals(pt.mimeType, ignoreCase = true) })
+            val shouldEnable = coreCodecs.any { it.equals(pt.mimeType, ignoreCase = true) }
+            pt.enable(shouldEnable)
+            if (pt.mimeType.equals("opus", ignoreCase = true)) {
+                pt.recvFmtp = "useinbandfec=1; usedtx=0; maxaveragebitrate=40000"
+            }
         }
         refreshCodecList(c)
 
@@ -397,6 +520,9 @@ object SipManager {
                     delay(500L)
                     if (core?.callsNb == 0) {
                         forceNetworkRebind()
+                    } else {
+                        core?.isNetworkReachable = true
+                        core?.refreshRegisters()
                     }
                 }
             }
@@ -492,6 +618,7 @@ object SipManager {
         params.isVideoEnabled = nextState
         call.update(params)
         _isVideoCall.value = nextState
+        updateProximitySensorLock()
     }
 
     fun applyNetworkPolicies(targetCore: Core? = core) {
@@ -516,8 +643,8 @@ object SipManager {
         }
         c.transports = transports
 
-        // jiPBX CGNAT Bypass via direct core config (100% SDK compatible)
         c.config.setBool("rtp", "symmetric", _enableRportSymmetric.value)
+        c.config.setBool("rtp", "rtp_keepalive", true)
         c.config.setBool("sip", "rport", true)
         c.config.setBool("sip", "use_rport", true)
         c.config.setInt("sip", "contact_rewrite", 1)
@@ -603,7 +730,7 @@ object SipManager {
         _dndEnabled.value = p.getBoolean("dnd", false)
         _autoAnswerEnabled.value = p.getBoolean("auto_ans", false)
         _stunServer.value = p.getString("stun_server", "stun.l.google.com:19302") ?: "stun.l.google.com:19302"
-        _keepAliveSec.value = p.getInt("keep_alive", 15)
+        _keepAliveSec.value = p.getInt("keep_alive", 10)
     }
 
     fun iterate() {
@@ -702,6 +829,8 @@ object SipManager {
         val cleanNumber = target.trim().replace(" ", "")
         if (cleanNumber.isEmpty()) return
 
+        _isVideoCall.value = isVideo
+        acquireLongCallLocks()
         c.isNetworkReachable = true
 
         if (c.callsNb > 0) {
@@ -731,7 +860,6 @@ object SipManager {
             params?.isAudioEnabled = true
             params?.isVideoEnabled = isVideo
             params?.mediaEncryption = MediaEncryption.None
-            _isVideoCall.value = isVideo
             c.inviteAddressWithParams(address, params!!)
         }
     }
@@ -819,6 +947,8 @@ object SipManager {
     fun answerCall(withVideo: Boolean = _isVideoCall.value) {
         val c = core ?: return
         val call = c.currentCall ?: return
+        _isVideoCall.value = withVideo
+        acquireLongCallLocks()
         val params = c.createCallParams(call)
         if (params != null) {
             params.isAudioEnabled = true
@@ -831,6 +961,7 @@ object SipManager {
 
     fun hangup() {
         val c = core ?: return
+        releaseLongCallLocks()
         if (c.callsNb > 0) {
             c.terminateAllCalls()
         } else {
@@ -869,6 +1000,7 @@ object SipManager {
             c.outputAudioDevice = device
         }
         _isSpeaker.value = next
+        updateProximitySensorLock()
     }
 
     fun sendDtmf(digit: Char) {

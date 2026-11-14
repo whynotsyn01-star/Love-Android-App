@@ -337,13 +337,10 @@ object SipManager {
         c.config.setInt("rtp", "video_jitt_comp", 80)
         c.config.setBool("sound", "ec_state", true)
 
-        val priorityOrder = listOf("PCMU", "PCMA", "G722", "opus", "GSM", "iLBC", "speex")
-        val sortedAudio = c.audioPayloadTypes.sortedBy { pt ->
-            val idx = priorityOrder.indexOfFirst { it.equals(pt.mimeType, ignoreCase = true) }
-            if (idx == -1) 99 else idx
-        }.toTypedArray()
-        c.audioPayloadTypes = sortedAudio
-        c.audioPayloadTypes.forEach { pt -> pt.enable(true) }
+        // Enable all audio codecs safely without reassigning read-only val property
+        c.audioPayloadTypes.forEach { pt ->
+            pt.enable(true)
+        }
         refreshCodecList(c)
 
         c.isVideoCaptureEnabled = true
@@ -353,7 +350,9 @@ object SipManager {
         videoPolicy.automaticallyInitiate = false
         c.videoActivationPolicy = videoPolicy
         c.setPreferredVideoDefinitionByName("720p")
-        c.videoPayloadTypes.forEach { pt -> pt.enable(true) }
+        c.videoPayloadTypes.forEach { pt ->
+            pt.enable(true)
+        }
 
         val frontCam = c.videoDevicesList.firstOrNull { it.contains("Front", ignoreCase = true) }
             ?: c.videoDevicesList.firstOrNull()

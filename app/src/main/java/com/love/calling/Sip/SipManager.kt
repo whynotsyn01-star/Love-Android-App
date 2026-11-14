@@ -32,7 +32,7 @@ data class SipAccountItem(
     val server: String,
     val username: String,
     val password: String,
-    val port: Int,
+    val port: Int?, // Nullable যাতে ফাকা রাখা যায়
     val transport: String
 )
 
@@ -111,14 +111,13 @@ object SipManager {
     private val _activeAccountId = MutableStateFlow("")
     val activeAccountId: StateFlow<String> = _activeAccountId.asStateFlow()
 
-    // Network & All UDP Ports Configuration
     private val _useWifiOnly = MutableStateFlow(false)
     val useWifiOnly: StateFlow<Boolean> = _useWifiOnly.asStateFlow()
 
     private val _allowIpv6 = MutableStateFlow(true)
     val allowIpv6: StateFlow<Boolean> = _allowIpv6.asStateFlow()
 
-    private val _useRandomPort = MutableStateFlow(true) // ON থাকলে সিস্টেমে উপলব্ধ যেকোনো ফ্রী UDP পোর্ট স্বয়ংক্রিয়ভাবে নিয়ে নেবে
+    private val _useRandomPort = MutableStateFlow(true)
     val useRandomPort: StateFlow<Boolean> = _useRandomPort.asStateFlow()
 
     private val _enableStunIce = MutableStateFlow(true)
@@ -463,8 +462,7 @@ object SipManager {
 
         val transports = c.transports
         if (_useRandomPort.value) {
-            // -1 দিলে অপারেটিং সিস্টেম যেকোনো ফ্রী বা ডাইনামিক UDP পোর্ট (Ephemeral Ports) স্বয়ংক্রিয়ভাবে অ্যালোকেট করে নেয়
-            transports.udpPort = -1
+            transports.udpPort = -1 // Dynamic / Ephemeral (Registered & Dynamic Ports auto-assigned)
             transports.tcpPort = -1
             transports.tlsPort = -1
         } else {
@@ -554,7 +552,7 @@ object SipManager {
         server: String,
         user: String,
         pass: String,
-        port: Int,
+        port: Int?, // Nullable port
         transport: String
     ) {
         val cleanServer = server.trim()
@@ -577,14 +575,19 @@ object SipManager {
 
     fun activateAccount(item: SipAccountItem) {
         _activeAccountId.value = item.id
-        appContext?.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)?.edit()
+        val editor = appContext?.getSharedPreferences("sip_prefs", Context.MODE_PRIVATE)?.edit()
             ?.putString("active_id", item.id)
             ?.putString("server", item.server)
             ?.putString("user", item.username)
             ?.putString("pass", item.password)
-            ?.putInt("port", item.port)
             ?.putString("transport", item.transport)
-            ?.apply()
+
+        if (item.port != null) {
+            editor?.putInt("port", item.port)
+        } else {
+            editor?.remove("port")
+        }
+        editor?.apply()
 
         register(item.server, item.username, item.password, item.port, item.transport)
     }
@@ -602,7 +605,7 @@ object SipManager {
         }
     }
 
-    fun register(server: String, user: String, pass: String, port: Int, transportMode: String) {
+    fun register(server: String, user: String, pass: String, port: Int?, transportMode: String) {
         val c = core ?: return
         applyNetworkPolicies(c)
         c.clearAccounts()
@@ -618,7 +621,10 @@ object SipManager {
         val accountParams = c.createAccountParams()
         val identity = Factory.instance().createAddress("sip:$cleanUser@$cleanServer")
         val trans = transportMode.lowercase(Locale.US)
-        val serverAddr = Factory.instance().createAddress("sip:$cleanServer:$port;transport=$trans")
+        
+        // যদি পোর্ট ফাকা থাকে, তবে কোড নিজে থেকে UDP-এর জন্য 5060 এবং TLS-এর জন্য 5061 ধরে নেবে
+        val finalPort = port ?: if (trans == "tls") 5061 else 5060
+        val serverAddr = Factory.instance().createAddress("sip:$cleanServer:$finalPort;transport=$trans")
 
         if (identity != null && serverAddr != null) {
             accountParams.identityAddress = identity
@@ -872,7 +878,7 @@ object SipManager {
             obj.put("server", acc.server)
             obj.put("username", acc.username)
             obj.put("password", acc.password)
-            obj.put("port", acc.port)
+            if (acc.port != null) obj.put("port", acc.port)
             obj.put("transport", acc.transport)
             arr.put(obj)
         }
@@ -898,7 +904,7 @@ object SipManager {
                         server = o.getString("server"),
                         username = o.getString("username"),
                         password = o.getString("password"),
-                        port = o.optInt("port", 5060),
+                        port = if (o.has("port")) o.getInt("port") else null,
                         transport = o.optString("transport", if (o.optBoolean("useTls", false)) "TLS" else "UDP")
                     )
                 )

@@ -915,7 +915,7 @@ fun MultiAccountScreen() {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
-    var port by remember { mutableStateOf("5060") }
+    var port by remember { mutableStateOf("") } // ডিফল্ট খালি বা ফাকা রাখা হয়েছে
     var transport by remember { mutableStateOf("UDP") }
 
     Column(
@@ -958,7 +958,8 @@ fun MultiAccountScreen() {
                                 )
                             }
                         }
-                        Text("${acc.username}@${acc.server}:${acc.port} (${acc.transport})", fontSize = 13.sp, color = Color.LightGray)
+                        val portStr = if (acc.port != null) ":${acc.port}" else ""
+                        Text("${acc.username}@${acc.server}$portStr (${acc.transport})", fontSize = 13.sp, color = Color.LightGray)
                     }
 
                     Row {
@@ -968,7 +969,7 @@ fun MultiAccountScreen() {
                             server = acc.server
                             username = acc.username
                             password = acc.password
-                            port = acc.port.toString()
+                            port = acc.port?.toString() ?: ""
                             transport = acc.transport
                         }) {
                             Icon(Icons.Default.Edit, contentDescription = "Edit", tint = Color.LightGray)
@@ -1032,10 +1033,11 @@ fun MultiAccountScreen() {
             shape = RoundedCornerShape(12.dp),
             singleLine = true
         )
+        // Server Port বক্স - এখন কিছু না লিখলে এটি এক্কেবারে ফাকা থাকবে, অটো কোনো নম্বর বসবে না
         OutlinedTextField(
             value = port,
             onValueChange = { port = it.filter { ch -> ch.isDigit() } },
-            label = { Text("Server Port (5060 for UDP/TCP, 5061 for TLS)") },
+            label = { Text("Server Port (Leave blank for default 5060/5061)") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
@@ -1047,10 +1049,7 @@ fun MultiAccountScreen() {
             listOf("UDP", "TCP", "TLS").forEach { mode ->
                 FilterChip(
                     selected = transport == mode,
-                    onClick = {
-                        transport = mode
-                        port = if (mode == "TLS") "5061" else "5060"
-                    },
+                    onClick = { transport = mode },
                     label = { Text(mode) }
                 )
             }
@@ -1058,14 +1057,14 @@ fun MultiAccountScreen() {
 
         Button(
             onClick = {
-                val p = port.toIntOrNull() ?: 5060
+                val p = port.toIntOrNull() // ফাকা থাকলে null পাস হবে
                 SipManager.saveAndActivateAccount(editingId, label, server, username, password, p, transport)
                 editingId = null
                 label = ""
                 server = ""
                 username = ""
                 password = ""
-                port = "5060"
+                port = ""
                 transport = "UDP"
             },
             colors = ButtonDefaults.buttonColors(containerColor = AccentRose),
@@ -1133,7 +1132,7 @@ fun AdvancedNetworkSettingsScreen() {
 
         SettingToggleCard(
             title = "Use random ports",
-            subtitle = "Keep ON to automatically bind all available UDP ports and bypass carrier blocks",
+            subtitle = "Keep ON to automatically bind registered and ephemeral UDP ports (-1) to bypass carrier blocks",
             checked = useRandomPort,
             onCheckedChange = { useRandomPort = it }
         )
